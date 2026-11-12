@@ -5,3 +5,7 @@ data/*.db
 data/*.db-wal
 data/*.db-shm
 .streamlit/secrets.toml
+
+# React front-end
+web/node_modules/
+web/dist/

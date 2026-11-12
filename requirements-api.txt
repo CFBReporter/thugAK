@@ -1,0 +1,8 @@
+# The HTTP bridge for the React front-end. Separate from requirements.txt so
+# the v1 Streamlit app and the MCP server still install without it.
+#
+# Pinned per the project's dependency-freshness rule: nothing published within
+# 7 days of 2026-11-12 (cutoff 2026-11-05). One substitution was made:
+#   fastapi 0.162.5 (2026-11-11, 1 day old) -> 0.162.0 (2026-10-23)
+fastapi==0.162.0
+uvicorn==0.54.0

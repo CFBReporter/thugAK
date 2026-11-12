@@ -1,0 +1,205 @@
+"""HTTP bridge: the v1 engine, unchanged, behind JSON endpoints for the React UI.
+
+The Streamlit app called `mcp.tools` functions directly in-process. React
+cannot, so this module exposes the same callables over HTTP. It is deliberately
+thin -- no analysis, no formatting, no business logic. Every number the browser
+renders was computed by the same code path that v1 and the MCP server use, so
+the web UI and Claude can never disagree about what a game is worth.
+
+Three things it does add, all of them about being a server rather than a script:
+
+1. **Error translation.** A `KeyError` from an unknown league is a 404, not a
+   500; a `ProviderUnavailable` is a 503 carrying the reason, so the UI can
+   display why a data source is off rather than a blank panel.
+2. **A single-writer guard.** SQLite gives "database is locked" when two
+   processes write at once, and `list_games` writes (it settles predictions).
+   Requests are serialised through one lock, which is correct for a local
+   single-user app and cheap at this request volume.
+3. **CORS for the Vite dev server**, which runs on a different port.
+
+Read-only with respect to Kalshi, exactly as v1: no key, no order endpoints.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+from pathlib import Path
+from typing import Any, Callable
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from fastapi import FastAPI, HTTPException, Query  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+
+from thugsak import config, localtime, providers  # noqa: E402
+from thugsak.mcp import tools  # noqa: E402
+
+app = FastAPI(
+    title="thugsak",
+    description="Kalshi sports edge finder -- read-only",
+    version="2.0.0-react",
+)
+
+# The Vite dev server is a different origin. In production the built assets are
+# served by this same app (see the static mount at the bottom), so these only
+# matter while developing.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
+
+# `list_games` settles predictions, so it writes. One lock across all requests
+# keeps SQLite to a single writer; see the module docstring.
+_DB_LOCK = asyncio.Lock()
+
+
+async def _call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run an engine call, translating its failures into HTTP ones."""
+    try:
+        async with _DB_LOCK:
+            return await fn(*args, **kwargs)
+    except providers.ProviderUnavailable as exc:
+        # 503: the provider exists but may not be used. The message says what
+        # would have to change, so it is safe and useful to show the user.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc).strip("'")) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/health")
+async def health() -> dict[str, Any]:
+    """Liveness plus which data provider is actually in force.
+
+    Reports each provider's own declaration rather than probing the network,
+    so a health check stays instant and never hits a third party.
+    """
+    return {
+        "healthy": True,
+        "provider": config.DATA_PROVIDER,
+        "providers": [
+            {
+                "name": name,
+                "leagues": sorted(p.leagues),
+                "blocked_reason": _blocked_reason(p),
+            }
+            for name, p in sorted(providers.available().items())
+        ],
+        "today": localtime.today_local().isoformat(),
+        "timezone": localtime.tz_abbrev(),
+    }
+
+
+def _blocked_reason(provider: Any) -> str | None:
+    """The provider's own explanation of why it cannot be used, or None.
+
+    Asks the provider by calling nothing -- a blocked provider raises
+    `ProviderUnavailable` from its methods, and the message is the reason, so
+    it is read from the one attribute rather than by triggering a failure.
+    """
+    from thugsak.providers import real as real_mod
+
+    if getattr(provider, "source_name", None) == "real" and not real_mod.PERMISSION_ON_FILE:
+        return real_mod._BLOCKED
+    return None
+
+
+@app.get("/api/leagues")
+async def leagues() -> dict[str, Any]:
+    return {
+        "leagues": [
+            {
+                "key": key,
+                "label": lg.name,
+            }
+            for key, lg in config.LEAGUES.items()
+        ],
+        "timezone": localtime.tz_abbrev(),
+        "today": localtime.today_local().isoformat(),
+    }
+
+
+@app.get("/api/games")
+async def games(
+    league: str = Query(..., description="nfl | nba | ncaaf | ncaamb"),
+    date: str | None = Query(None, description="YYYY-MM-DD, Central Time; default today"),
+) -> Any:
+    """Today's (or a past date's) slate. Past dates drive the lookback."""
+    return await _call(tools.list_games, league, date)
+
+
+@app.get("/api/recommendation")
+async def recommendation(
+    league: str = Query(...),
+    game_id: str = Query(...),
+    contracts: int = Query(100, ge=1, le=10_000),
+) -> Any:
+    """The answer: predicted score, one definitive call, and the five bets."""
+    return await _call(tools.get_recommendation, league, game_id, contracts=contracts)
+
+
+@app.get("/api/prediction")
+async def prediction(
+    league: str = Query(...),
+    game_id: str = Query(...),
+    include_injuries: bool = Query(True),
+) -> Any:
+    """Every model input behind the prediction, for the 'show your work' panel."""
+    return await _call(
+        tools.get_prediction, league, game_id, include_injuries=include_injuries
+    )
+
+
+@app.get("/api/track-record")
+async def track_record(
+    league: str | None = Query(None),
+    since: str | None = Query(None),
+) -> Any:
+    return await _call(tools.get_track_record, league, since=since)
+
+
+@app.get("/api/team-stats")
+async def team_stats(league: str = Query(...), team: str = Query(...)) -> Any:
+    return await _call(tools.get_team_stats, league, team)
+
+
+@app.get("/api/money-flow")
+async def money_flow(
+    ticker: str = Query(...),
+    lookback_hours: int = Query(48, ge=1, le=720),
+) -> Any:
+    return await _call(tools.get_money_flow, ticker, lookback_hours=lookback_hours)
+
+
+@app.get("/api/price-history")
+async def price_history(
+    ticker: str = Query(...),
+    hours: int = Query(72, ge=1, le=2160),
+    interval: int = Query(60),
+) -> Any:
+    if interval not in config.CANDLE_INTERVALS:
+        # Kalshi returns an empty list rather than an error for a bad interval,
+        # which reads as "no history" instead of "you asked wrongly".
+        raise HTTPException(
+            status_code=400,
+            detail=f"interval must be one of {list(config.CANDLE_INTERVALS)}",
+        )
+    return await _call(tools.get_price_history, ticker, hours=hours, interval=interval)
+
+
+# Serve the built front-end if it has been built, so one process runs the whole
+# app in production. Absent a build, the API still works on its own and Vite
+# serves the UI in dev.
+_DIST = ROOT / "web" / "dist"
+if _DIST.is_dir():
+    from fastapi.staticfiles import StaticFiles
+
+    app.mount("/", StaticFiles(directory=str(_DIST), html=True), name="web")

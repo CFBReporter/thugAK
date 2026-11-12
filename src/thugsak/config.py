@@ -11,6 +11,8 @@ ways that bite silently, so they are declared once and read everywhere:
 
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -34,6 +36,13 @@ FEE_RATE_MAKER = Decimal("0.0175")
 # means today here -- not in UTC, which has already rolled over by the time
 # evening games tip off. Storage stays UTC; see `thugsak.localtime`.
 LOCAL_TZ_NAME = "America/Chicago"
+
+# Which game-data provider supplies schedules, teams, injuries and game logs.
+# ESPN is the default and the only one currently usable; see
+# `thugsak.providers` for the seam and `providers/real.py` for the status of
+# the Real Sports source. Override with the THUGSAK_PROVIDER env var so a
+# swap needs no code change.
+DATA_PROVIDER = os.environ.get("THUGSAK_PROVIDER", "espn")
 
 # Candlestick period_interval accepts ONLY these values. Anything else returns
 # an empty list rather than an error, which is a silent failure mode.
