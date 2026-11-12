@@ -1,0 +1,15 @@
+# Pinned per the project's dependency-freshness rule: nothing published within
+# 7 days of 2026-11-11. Two substitutions were made and approved:
+#   claude-agent-sdk 0.2.180 (Nov 9) -> 0.2.178 (Nov 4)
+#   streamlit        1.67.0  (Nov 5) -> 1.66.1  (Oct 21)
+claude-agent-sdk==0.2.178
+streamlit==1.66.1
+pandas==3.1.1
+numpy==2.5.4
+mcp==2.3.0
+plotly==7.1.0
+httpx==0.28.1
+# zoneinfo has no tz database to fall back on under Windows, and every date in
+# this app is a Central-Time date, so the tz data is load-bearing rather than
+# optional. 2026.6 was published 2026-10-28, clear of the 7-day cutoff.
+tzdata==2026.6

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "thugsak": {
+      "command": ".venv/Scripts/python.exe",
+      "args": ["-m", "thugsak.mcp.server"],
+      "env": { "PYTHONPATH": "src" }
+    }
+  }
+}

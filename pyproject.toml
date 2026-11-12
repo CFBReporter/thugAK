@@ -1,0 +1,12 @@
+[project]
+name = "thugsak"
+version = "0.1.0"
+description = "Kalshi sports prediction and edge finder (read-only)"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
