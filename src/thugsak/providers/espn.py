@@ -27,6 +27,17 @@ class EspnProvider:
     def __init__(self, client: Any | None = None):
         self._client = client
 
+    def session(self, client: Any | None = None) -> Any:
+        """The v1 client itself.
+
+        `EspnClient` is already an async context manager carrying exactly the
+        methods the protocol names, so the seam costs nothing here: call sites
+        that said `EspnClient(client)` now say `provider.session(client)` and
+        get the identical object. That is why wiring the seam cannot change
+        any number the model produces.
+        """
+        return espn_mod.EspnClient(client if client is not None else self._client)
+
     async def scoreboard(self, league_key: str, date: str | None = None) -> list[Any]:
         async with espn_mod.EspnClient(self._client) as ec:
             return await ec.scoreboard(league_key, date)

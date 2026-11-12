@@ -117,11 +117,11 @@ dependency on a project where dependency freshness is a stated concern.
 ## Tests
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q      # 240
+.venv/Scripts/python.exe -m pytest -q      # 245
 cd web && npm run typecheck
 ```
 
-240 = v1's 228, unchanged, plus 12 on the provider seam. The seam's tests
+245 = v1's 228, unchanged, plus 17 on the provider seam. The seam's tests
 assert that a blocked provider raises with a stated reason rather than
 returning empty — the v1 bug worth not repeating was `import_nfl` silently
 dropping teams it could not resolve, which left two NFL clubs with one stored

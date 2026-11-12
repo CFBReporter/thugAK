@@ -49,18 +49,18 @@ export function GameDetail({
           {/* ---- predicted score ---- */}
           <Card className="hero">
             <div className="score">
+              {/* Keyed by side, not by name. `predicted_points` is keyed by
+                  the model's display label ("Washington Commanders"), which
+                  is not the abbreviation the slate hands us ("WSH"), so
+                  indexing it by that would render a dash on every game. */}
               <div className="score-side away">
                 <div className="score-team">{game.away_name}</div>
-                <div className="score-num">
-                  {points(data.predicted_points[game.away_label] ?? null)}
-                </div>
+                <div className="score-num">{points(data.predicted_away_points)}</div>
               </div>
               <div className="score-sep">&ndash;</div>
               <div className="score-side">
                 <div className="score-team">{game.home_name}</div>
-                <div className="score-num">
-                  {points(data.predicted_points[game.home_label] ?? null)}
-                </div>
+                <div className="score-num">{points(data.predicted_home_points)}</div>
               </div>
             </div>
 

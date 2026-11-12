@@ -100,6 +100,12 @@ class RealProvider:
     def _blocked(self) -> ProviderUnavailable:
         return ProviderUnavailable(_BLOCKED)
 
+    def session(self, client: Any | None = None) -> Any:
+        # Fails here, before any request is attempted, so a misconfigured
+        # provider is reported as itself rather than as a prediction that
+        # mysteriously has no data behind it.
+        raise self._blocked()
+
     async def scoreboard(self, league_key: str, date: str | None = None) -> list[Any]:
         raise self._blocked()
 

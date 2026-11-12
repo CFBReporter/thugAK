@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Sequence
 
-from .. import cache, matching, store
+from .. import cache, config, matching, providers, store
 from ..analysis import (
     devig,
     edge as edge_mod,
@@ -64,6 +64,16 @@ MODEL_NOTE = (
     "Sportsbook lines are converted to this convention. All edges are net of "
     "Kalshi fees."
 )
+
+
+def _provider() -> Any:
+    """The configured game-data provider.
+
+    Resolved per call rather than at import, so THUGSAK_PROVIDER can be
+    changed without restarting an interpreter that has already imported this
+    module -- which matters for the tests and for a dev server.
+    """
+    return providers.get(config.DATA_PROVIDER)
 
 
 def _json(obj: Any) -> Any:
@@ -107,6 +117,19 @@ def _attach_subjects(
             event_titles=event_titles,
         )
         setattr(m, "_subject_team", mr.subject_team or fallback)
+
+
+def _winner_price(winner: Sequence[Any], team_id: str) -> float | None:
+    """The yes ask on `team_id` winning, or None if that market is absent.
+
+    Absent is a normal state -- Kalshi lists one side of some games only, and
+    a settled market can have no ask at all -- so it returns None rather than
+    raising, and the caller shows a dash.
+    """
+    for m in winner:
+        if getattr(m, "_subject_team", None) == team_id:
+            return float(m.yes_ask) if m.yes_ask else None
+    return None
 
 
 async def _league_markets(
@@ -220,7 +243,7 @@ async def list_games(
     async with cache.make_client() as client:
         with store.connect(db) as conn:
             # Refresh the slate from ESPN so the requested date exists locally.
-            async with espn_mod.EspnClient(client) as ec:
+            async with _provider().session(client) as ec:
                 try:
                     live = await ec.scoreboard(league, date=date)
                 except Exception as e:
@@ -303,6 +326,17 @@ async def list_games(
                             m.ticker: float(m.yes_ask) if m.yes_ask else None
                             for m in winner
                         },
+                        # Resolved by subject team rather than left for the
+                        # caller to infer from the ticker. Kalshi's code and
+                        # the stored team id disagree often enough that
+                        # suffix-matching a ticker silently picks the wrong
+                        # side: Kalshi writes WAS where the store says WSH, so
+                        # "ends with -WSH" finds nothing and the home price
+                        # reads as unavailable. `_subject_team` is already the
+                        # canonical id, via the same alias table everything
+                        # else uses.
+                        "home_win_price": _winner_price(winner, r["home_team"]),
+                        "away_win_price": _winner_price(winner, r["away_team"]),
                         "has_ladders": any("SPREAD" in m.ticker or "TOTAL" in m.ticker
                                            for m in markets),
                     }
@@ -444,7 +478,7 @@ async def _injury_impacts(
     espn_id = game["game_id"].split(":")[-1]
     out: dict[str, list[injuries_mod.InjuryImpact]] = {}
 
-    async with espn_mod.EspnClient(client) as ec:
+    async with _provider().session(client) as ec:
         summary = await ec.summary(league, espn_id)
         by_abbrev = ec.parse_injuries(summary)
         if not by_abbrev:
@@ -841,7 +875,7 @@ async def _market_line(
         out["source"] = "unavailable (no ESPN event id for this game)"
         return out
     try:
-        async with espn_mod.EspnClient(client) as ec:
+        async with _provider().session(client) as ec:
             summary = await ec.summary(league, espn_id)
             lines = ec.parse_pickcenter(summary)
     except Exception as e:
@@ -1216,6 +1250,13 @@ async def get_recommendation(
             outlook.away_label: outlook.away_points,
             outlook.home_label: outlook.home_points,
         },
+        # The same two numbers, keyed by side rather than by name. The dict
+        # above is keyed by the model's own display label ("Washington
+        # Commanders"), which is not the abbreviation a caller holds from the
+        # slate ("WSH"), so indexing it by that abbreviation silently yields
+        # nothing. Side is unambiguous and needs no name to agree.
+        "predicted_away_points": outlook.away_points,
+        "predicted_home_points": outlook.home_points,
         "predicted_winner": outlook.winner,
         "win_probability": outlook.win_prob,
         "predicted_margin": outlook.margin,
@@ -1545,7 +1586,7 @@ async def get_team_stats(
 
             espn_power: dict[str, Any] = {}
             try:
-                async with espn_mod.EspnClient(client) as ec:
+                async with _provider().session(client) as ec:
                     power = await ec.power_index(league)
                 eid = _espn_team_id(conn, league, team_id)
                 if eid in power:

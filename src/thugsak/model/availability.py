@@ -32,6 +32,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
+from .. import config, providers
 from . import asof
 
 # How many of the team's recent completed games to read.
@@ -262,7 +263,7 @@ async def team_availability(
         rep.note = "No ESPN team id, so box scores cannot be located."
         return rep
 
-    async with espn_mod.EspnClient(client) as ec:
+    async with providers.get(config.DATA_PROVIDER).session(client) as ec:
         try:
             schedule = await ec.team_schedule(league, espn_team_id)
         except Exception as e:

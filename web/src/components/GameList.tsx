@@ -6,24 +6,14 @@ import { Empty } from './bits'
  * One row per game, in the shape a prediction-market screen uses: who is
  * playing on the left, the numbers that would make you click on the right.
  *
- * The win price shown is the *home* team's, labelled with the home team's
- * abbreviation so it is never ambiguous which side the number belongs to.
- * `kalshi_winner_prices` is keyed by ticker, and the engine appends the
- * subject team's code to a winner ticker, so the home side is found by that
- * suffix rather than by position.
+ * Both win prices come from the server already resolved to a side
+ * (`home_win_price` / `away_win_price`). They are deliberately not derived
+ * here from `kalshi_winner_prices`, which is keyed by ticker: Kalshi's team
+ * codes and the store's team ids disagree -- WAS against WSH, for one -- so
+ * matching a ticker suffix in the browser would quietly show the wrong team's
+ * price, or none. Side resolution belongs with the alias table.
  */
-function homeWinPrice(g: GameRow): number | null {
-  const entries = Object.entries(g.kalshi_winner_prices)
-  if (entries.length === 0) return null
-  const suffix = `-${g.home_label.toUpperCase()}`
-  for (const [ticker, price] of entries) {
-    if (ticker.toUpperCase().endsWith(suffix)) return price
-  }
-  return null
-}
-
 function Row({ game, onPick }: { game: GameRow; onPick: (g: GameRow) => void }) {
-  const price = homeWinPrice(game)
   const [awayScore, homeScore] = (game.score ?? '').split('-')
   const aw = awayScore ? Number(awayScore) : null
   const hm = homeScore ? Number(homeScore) : null
@@ -58,8 +48,12 @@ function Row({ game, onPick }: { game: GameRow; onPick: (g: GameRow) => void }) 
 
         <div className="odds">
           <div className="odds-cell">
+            <span className="k">{game.away_label} win</span>
+            <span className="v">{cents(game.away_win_price)}</span>
+          </div>
+          <div className="odds-cell">
             <span className="k">{game.home_label} win</span>
-            <span className="v">{cents(price)}</span>
+            <span className="v">{cents(game.home_win_price)}</span>
           </div>
           <div className="odds-cell">
             <span className="k">Spread</span>

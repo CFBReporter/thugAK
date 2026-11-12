@@ -88,3 +88,60 @@ def test_provider_unavailable_is_not_a_network_error():
     # not, so nothing should ever wrap it in a retry loop.
     assert issubclass(providers.ProviderUnavailable, RuntimeError)
     assert not issubclass(providers.ProviderUnavailable, OSError)
+
+
+# --- the seam is load-bearing, not decorative -------------------------------
+#
+# A seam that exists but is bypassed is worse than none: it reads as a swap
+# being supported when the call sites still name one source. These assert the
+# wiring, so a future refactor that re-hardcodes ESPN fails here.
+
+
+def test_tools_goes_through_the_provider_not_espn_directly():
+    import inspect
+
+    from thugsak.mcp import tools
+
+    src = inspect.getsource(tools)
+    assert "_provider().session(client)" in src
+    # The module may still import the ESPN client for its dataclasses and URL
+    # constants; what must not come back is constructing it as the feed.
+    assert "espn_mod.EspnClient(client)" not in src
+
+
+def test_availability_goes_through_the_provider():
+    import inspect
+
+    from thugsak.model import availability
+
+    src = inspect.getsource(availability)
+    assert "providers.get(config.DATA_PROVIDER).session(client)" in src
+    assert "espn_mod.EspnClient(client)" not in src
+
+
+def test_blocked_provider_refuses_at_session_acquisition():
+    # Before any request, so a misconfigured provider is reported as itself
+    # rather than as a prediction that mysteriously has no data behind it.
+    p = providers.get("real")
+    with pytest.raises(providers.ProviderUnavailable):
+        p.session(None)
+
+
+def test_espn_session_is_the_v1_client_unchanged():
+    # The guarantee that wiring the seam changed no number: the object handed
+    # back is the same class v1 used.
+    from thugsak.clients import espn as espn_mod
+
+    sess = providers.get("espn").session(None)
+    assert isinstance(sess, espn_mod.EspnClient)
+
+
+def test_selecting_a_provider_reads_config_at_call_time(monkeypatch):
+    from thugsak import config
+    from thugsak.mcp import tools
+
+    monkeypatch.setattr(config, "DATA_PROVIDER", "real")
+    # Resolved per call, so changing the setting takes effect without a
+    # re-import -- which is what makes THUGSAK_PROVIDER usable at all.
+    with pytest.raises(providers.ProviderUnavailable):
+        tools._provider().session(None)

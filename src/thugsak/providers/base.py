@@ -41,6 +41,18 @@ class GameDataProvider(Protocol):
     source_name: str
     leagues: set[str]
 
+    def session(self, client: Any | None = None) -> Any:
+        """An async context manager exposing the methods below.
+
+        Call sites open one session and make several calls inside it, because
+        a prediction needs a scoreboard plus a schedule per team plus a
+        summary, and reusing one HTTP connection across them matters. A
+        provider that cannot be used raises here, at the point of acquisition,
+        rather than once per method -- so a blocked provider fails before any
+        work is done instead of halfway through a game's analysis.
+        """
+        ...
+
     async def scoreboard(self, league_key: str, date: str | None = None) -> list[Any]:
         """Games for a date. `date` is YYYYMMDD; None means the current slate."""
         ...

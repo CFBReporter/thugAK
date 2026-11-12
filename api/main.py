@@ -64,7 +64,16 @@ async def _call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     """Run an engine call, translating its failures into HTTP ones."""
     try:
         async with _DB_LOCK:
-            return await fn(*args, **kwargs)
+            result = await fn(*args, **kwargs)
+        # The engine reports a bad reference by returning {"error": ...} with
+        # no exception, because its original caller was Claude reading prose.
+        # Over HTTP that arrives as a 200 and the UI renders an empty page, so
+        # it is promoted to a real status the front-end already handles.
+        if isinstance(result, dict) and "error" in result and len(result) == 1:
+            raise HTTPException(status_code=404, detail=str(result["error"]))
+        return result
+    except HTTPException:
+        raise
     except providers.ProviderUnavailable as exc:
         # 503: the provider exists but may not be used. The message says what
         # would have to change, so it is safe and useful to show the user.

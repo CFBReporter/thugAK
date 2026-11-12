@@ -28,6 +28,9 @@ export interface GameRow {
   book_total: number | null
   kalshi_markets: number
   kalshi_winner_prices: Record<string, number | null>
+  /** Already resolved to a side by the server; see GameList for why. */
+  home_win_price: number | null
+  away_win_price: number | null
   has_ladders: boolean
 }
 
@@ -111,6 +114,9 @@ export interface RecommendationResponse {
   predicted_score: string
   predicted_result: string
   predicted_points: Record<string, number | null>
+  /** Keyed by side; `predicted_points` is keyed by display name. */
+  predicted_away_points: number | null
+  predicted_home_points: number | null
   predicted_winner: string
   win_probability: number | null
   predicted_margin: number | null
