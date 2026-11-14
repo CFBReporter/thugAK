@@ -29,6 +29,10 @@ from .config import PROJECT_ROOT
 
 ENV_VAR = "THUGSAK_DATABASE_URL"
 ENV_FILE = PROJECT_ROOT / ".env"
+# Optional Postgres schema to work in instead of `public`. Production leaves
+# it unset; the test harness sets one per test so tests never share tables
+# and never touch the real data.
+SCHEMA_ENV_VAR = "THUGSAK_PG_SCHEMA"
 
 
 # --------------------------------------------------------------------------
@@ -79,6 +83,13 @@ def backend() -> str:
     raise ValueError(
         f"{ENV_VAR} must be a postgres:// or postgresql:// URL, or empty for SQLite"
     )
+
+
+def target_key() -> str:
+    """Identifies the database a connection would reach -- URL plus schema --
+    so per-process caches (e.g. "migrations already applied") are scoped to
+    it. The schema part lets the test harness give each test its own."""
+    return f"{database_url()}#{os.environ.get(SCHEMA_ENV_VAR, '')}"
 
 
 def redacted(url: str | None = None) -> str:
@@ -248,6 +259,60 @@ class PgConnection:
         return self._conn
 
 
+# --------------------------------------------------------------------------
+# migrations
+# --------------------------------------------------------------------------
+
+MIGRATIONS_DIR = PROJECT_ROOT / "migrations" / "postgres"
+
+
+def migration_files(directory=None) -> list:
+    """`NNNN_name.sql` files in apply order."""
+    d = MIGRATIONS_DIR if directory is None else directory
+    return sorted(p for p in d.glob("*.sql") if p.name[:4].isdigit())
+
+
+def apply_migrations(conn: PgConnection, directory=None) -> list[str]:
+    """Apply every migration not yet recorded, in order. Returns their names.
+
+    Each file runs in its own transaction together with its bookkeeping row,
+    so a failure part-way through a file leaves nothing behind and the next
+    run retries the same file. Safe to call on every start-up.
+    """
+    from datetime import datetime, timezone
+
+    raw = conn.raw
+    raw.execute(
+        """CREATE TABLE IF NOT EXISTS schema_migrations (
+               version    TEXT PRIMARY KEY,
+               applied_at TEXT NOT NULL
+           )"""
+    )
+    raw.execute("ALTER TABLE schema_migrations ENABLE ROW LEVEL SECURITY")
+    raw.commit()
+    done = {r[0] for r in raw.execute("SELECT version FROM schema_migrations")}
+    raw.commit()
+
+    applied: list[str] = []
+    for path in migration_files(directory):
+        version = path.stem
+        if version in done:
+            continue
+        sql = path.read_text(encoding="utf-8")
+        try:
+            raw.execute(sql)
+            raw.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (%s, %s)",
+                (version, datetime.now(timezone.utc).isoformat(timespec="seconds")),
+            )
+            raw.commit()
+        except Exception:
+            raw.rollback()
+            raise
+        applied.append(version)
+    return applied
+
+
 def connect_postgres(url: str | None = None, *, connect_timeout: int = 15) -> PgConnection:
     import psycopg  # imported here so SQLite-only installs need no driver
 
@@ -267,4 +332,11 @@ def connect_postgres(url: str | None = None, *, connect_timeout: int = 15) -> Pg
         # reach a log or a traceback.
         raise RuntimeError(f"could not connect to {redacted(target)}: "
                            f"{str(exc).replace(target, redacted(target))}") from None
+    schema = os.environ.get(SCHEMA_ENV_VAR, "").strip()
+    if schema:
+        from psycopg import sql as pgsql
+
+        conn.execute(pgsql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(pgsql.Identifier(schema)))
+        conn.execute(pgsql.SQL("SET search_path TO {}").format(pgsql.Identifier(schema)))
+        conn.commit()
     return PgConnection(conn)

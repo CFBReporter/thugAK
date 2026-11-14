@@ -417,13 +417,7 @@ POST_MIGRATION_INDEXES = (
 def init_db(path: Path | str = DB_PATH) -> list[str]:
     """Create the schema if absent, then apply any pending column additions."""
     if uses_postgres(path):
-        # The SQLite schema script and migrations must never run against
-        # Postgres: half of it would apply before the first SQLite-only
-        # construct failed. Postgres gets a versioned migration (phase 2).
-        raise NotImplementedError(
-            "Postgres schema is not created by init_db; run the Postgres "
-            "migration (phase 2). Set THUGSAK_DATABASE_URL= to use SQLite."
-        )
+        return _init_postgres()
     with connect(path) as conn:
         conn.executescript(SCHEMA)
         applied = _migrate(conn)
@@ -438,6 +432,32 @@ def init_db(path: Path | str = DB_PATH) -> list[str]:
         if n:
             applied.append(f"team_game_stats: cleared placeholder scores on {n} unfinished rows")
         return applied
+
+
+# Targets already brought up to date in this process. `init_db` is called at
+# the top of nearly every tool, which on SQLite is a few local statements but
+# on Postgres would be several network round trips per request. The SQLite
+# schema script and its PRAGMA-based column migrations never run here: the
+# Postgres schema is the versioned files in migrations/postgres.
+_PG_READY: set[str] = set()
+
+
+def _init_postgres() -> list[str]:
+    key = db.target_key()
+    if key in _PG_READY:
+        return []
+    with connect() as conn:
+        applied = [f"migration {v}" for v in db.apply_migrations(conn)]
+        applied += _dedupe_predictions(conn)
+        applied += _backfill_prediction_context(conn)
+        n = _backfill_slate_dates(conn)
+        if n:
+            applied.append(f"games.slate_date backfilled ({n} rows, Central)")
+        n = _clear_unfinished_scores(conn)
+        if n:
+            applied.append(f"team_game_stats: cleared placeholder scores on {n} unfinished rows")
+    _PG_READY.add(key)
+    return applied
 
 
 def _clear_unfinished_scores(conn: sqlite3.Connection) -> int:

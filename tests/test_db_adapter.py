@@ -70,10 +70,30 @@ def test_only_the_default_path_is_redirected(monkeypatch, tmp_path):
     assert store.uses_postgres(tmp_path / "t.db") is False
 
 
-def test_init_db_refuses_to_run_sqlite_ddl_on_postgres(monkeypatch):
+def test_init_db_on_postgres_uses_migrations_not_the_sqlite_script(monkeypatch):
+    # The SQLite SCHEMA (AUTOINCREMENT, PRAGMA migrations) must never reach
+    # Postgres; init_db routes to the versioned migrations instead.
     monkeypatch.setenv(db.ENV_VAR, PG)
-    with pytest.raises(NotImplementedError):
-        store.init_db()
+    called = []
+    monkeypatch.setattr(store, "_init_postgres", lambda: called.append(1) or ["ok"])
+    assert store.init_db() == ["ok"] and called == [1]
+
+
+def test_migration_files_are_ordered_and_numbered():
+    files = db.migration_files()
+    assert files, "no Postgres migrations found"
+    assert [f.name for f in files] == sorted(f.name for f in files)
+    assert files[0].name == "0001_initial.sql"
+
+
+def test_initial_migration_locks_every_table_with_rls():
+    import re as _re
+
+    sql = _re.sub(r"--[^\n]*", "", db.migration_files()[0].read_text(encoding="utf-8"))
+    created = set(__import__("re").findall(r"CREATE TABLE IF NOT EXISTS (\w+)", sql))
+    locked = set(__import__("re").findall(r"ALTER TABLE (\w+)\s+ENABLE ROW LEVEL SECURITY", sql))
+    assert created == locked, created ^ locked
+    assert "AUTOINCREMENT" not in sql and " REAL" not in sql.replace("DOUBLE PRECISION", "")
 
 
 def test_redacted_hides_the_password():
@@ -140,6 +160,18 @@ def test_live_fetchall_and_rowcount():
         cur = conn.execute("SELECT 1")
     assert [r["n"] for r in rows] == [1, 2, 3]
     assert cur.rowcount == 1
+
+
+@live
+def test_live_schema_is_migrated_and_locked():
+    with store.connect(readonly=True) as conn:
+        versions = [r["version"] for r in conn.execute("SELECT version FROM schema_migrations")]
+        unlocked = conn.execute(
+            "SELECT count(*) AS n FROM pg_tables WHERE schemaname = current_schema() "
+            "AND NOT rowsecurity"
+        ).fetchone()["n"]
+    assert "0001_initial" in versions
+    assert unlocked == 0
 
 
 @live
