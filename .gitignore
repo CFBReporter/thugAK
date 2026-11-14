@@ -13,3 +13,6 @@ data/logs/
 # React front-end
 web/node_modules/
 web/dist/
+
+# Local secrets
+.env
