@@ -521,6 +521,8 @@ def upsert_team(
             None if is_d1 is None else int(is_d1),
         ),
     )
+    # The teams cache (and the fuzzy-match cache keyed on it) must see this.
+    _TEAMS_CACHE.pop((db_ident(conn), league), None)
     return tid
 
 
@@ -536,16 +538,100 @@ def d1_teams(conn: sqlite3.Connection, league: str) -> list[sqlite3.Row]:
     )
 
 
+# --------------------------------------------------------------------------
+# in-process caches for the name tables
+# --------------------------------------------------------------------------
+#
+# One slate load resolves the same few hundred team names thousands of times
+# (3,884 alias lookups for one NBA slate). Against a local SQLite file that
+# is ~2s; against a hosted Postgres at ~84ms a round trip it was 8 minutes.
+# So each league's alias and team tables are read once and answered from
+# memory.
+#
+# Kept correct by: every write through this module updates or drops the
+# cache; the three raw writes in `matching` call `invalidate_name_caches`;
+# and entries expire after NAME_CACHE_TTL so a write from *another* process
+# (the hourly agents beside the API) is picked up within that window. A name
+# missing from a stale cache falls through to fuzzy matching, not to a wrong
+# answer.
+
+NAME_CACHE_TTL = 300.0
+
+# matching._find_game memo; cleared by upsert_game. Short TTL as a backstop
+# for game writes made by another process.
+GAME_LOOKUP_CACHE: dict[tuple[Any, ...], tuple[float, Any]] = {}
+GAME_LOOKUP_TTL = 60.0
+_ALIAS_CACHE: dict[tuple[str, str], tuple[float, dict[tuple[str, str], str], dict[str, str]]] = {}
+_TEAMS_CACHE: dict[tuple[str, str], tuple[float, list[Any], int]] = {}
+
+
+def db_ident(conn: Any) -> str:
+    """Which database a connection reaches: SQLite file path, or URL + schema."""
+    if is_postgres(conn):
+        return db.target_key()
+    row = conn.execute("PRAGMA database_list").fetchone()
+    return row[2] if row else ""
+
+
+def invalidate_name_caches(conn: Any | None = None, league: str | None = None) -> None:
+    """Drop cached alias/team tables -- for one league of one database, or all."""
+    if conn is None:
+        _ALIAS_CACHE.clear()
+        _TEAMS_CACHE.clear()
+        return
+    ident = db_ident(conn)
+    for cache in (_ALIAS_CACHE, _TEAMS_CACHE):
+        for key in [k for k in cache if k[0] == ident and (league is None or k[1] == league)]:
+            cache.pop(key, None)
+
+
+def _alias_table(conn: Any, league: str):
+    import time as _time
+
+    key = (db_ident(conn), league)
+    hit = _ALIAS_CACHE.get(key)
+    if hit and _time.monotonic() - hit[0] < NAME_CACHE_TTL:
+        return hit[1], hit[2]
+    by_source: dict[tuple[str, str], str] = {}
+    shared: dict[str, tuple[str, str]] = {}
+    for r in conn.execute(
+        "SELECT alias, source, team_id FROM team_aliases WHERE league=?", (league,)
+    ).fetchall():
+        alias, source, team_id = r[0], r[1], r[2]
+        by_source[(alias, source)] = team_id
+        if not source.startswith(SCOPED_PREFIX):
+            # The unscoped fallback takes the alphabetically first source,
+            # which is what the indexed `LIMIT 1` query returned in SQLite --
+            # now deterministic on Postgres too.
+            cur = shared.get(alias)
+            if cur is None or source < cur[0]:
+                shared[alias] = (source, team_id)
+    flat = {a: t for a, (_s, t) in shared.items()}
+    _ALIAS_CACHE[key] = (_time.monotonic(), by_source, flat)
+    return by_source, flat
+
+
 def add_alias(
     conn: sqlite3.Connection, league: str, alias: str, source: str, team_id: str
 ) -> None:
     if not alias:
         return
+    a = alias.strip().lower()
+    by_source, flat = _alias_table(conn, league)
+    if (a, source) in by_source:
+        # Already stored (ON CONFLICT DO NOTHING would keep the old mapping
+        # anyway) -- skip the write. This was 1,044 redundant inserts per slate.
+        return
     conn.execute(
         """INSERT INTO team_aliases (league, alias, source, team_id)
            VALUES (?,?,?,?) ON CONFLICT DO NOTHING""",
-        (league, alias.strip().lower(), source, team_id),
+        (league, a, source, team_id),
     )
+    by_source[(a, source)] = team_id
+    if not source.startswith(SCOPED_PREFIX):
+        # Keep the cached fallback in step with the alphabetical-first rule.
+        rivals = [s for (al, s) in by_source if al == a and not s.startswith(SCOPED_PREFIX)]
+        flat[a] = by_source[(a, min(rivals))]
 
 
 # Aliases registered under a source carrying this prefix are *private to that
@@ -568,29 +654,41 @@ def resolve_alias(
     if not alias:
         return None
     a = alias.strip().lower()
+    by_source, flat = _alias_table(conn, league)
     if source:
         for src in (SCOPED_PREFIX + source, source):
-            row = conn.execute(
-                "SELECT team_id FROM team_aliases "
-                "WHERE league=? AND alias=? AND source=?",
-                (league, a, src),
-            ).fetchone()
-            if row:
-                return row["team_id"]
-    row = conn.execute(
-        "SELECT team_id FROM team_aliases WHERE league=? AND alias=? "
-        "AND source NOT LIKE ? LIMIT 1",
-        (league, a, SCOPED_PREFIX + "%"),
-    ).fetchone()
-    return row["team_id"] if row else None
+            hit = by_source.get((a, src))
+            if hit:
+                return hit
+    return flat.get(a)
 
 
 def all_teams(conn: sqlite3.Connection, league: str) -> list[sqlite3.Row]:
-    return list(
+    import time as _time
+
+    key = (db_ident(conn), league)
+    hit = _TEAMS_CACHE.get(key)
+    if hit and _time.monotonic() - hit[0] < NAME_CACHE_TTL:
+        return hit[1]
+    rows = list(
         conn.execute(
             "SELECT * FROM teams WHERE league=? ORDER BY canonical", (league,)
         )
     )
+    global _TEAMS_LOADS
+    _TEAMS_LOADS += 1
+    _TEAMS_CACHE[key] = (_time.monotonic(), rows, _TEAMS_LOADS)
+    return rows
+
+
+_TEAMS_LOADS = 0
+
+
+def teams_version(conn: Any, league: str) -> tuple[str, str, int]:
+    """Changes every time the cached teams table for this league reloads."""
+    all_teams(conn, league)
+    ident = db_ident(conn)
+    return (ident, league, _TEAMS_CACHE[(ident, league)][2])
 
 
 def team_label(conn: sqlite3.Connection, team_id: str, *, short: bool = False) -> str:
@@ -602,9 +700,10 @@ def team_label(conn: sqlite3.Connection, team_id: str, *, short: bool = False) -
     """
     if not team_id:
         return ""
-    row = conn.execute(
-        "SELECT canonical, display_name FROM teams WHERE team_id=?", (team_id,)
-    ).fetchone()
+    # From the cached league table (team ids are "<league>:<code>"): a slate
+    # renders two labels per game, which was a round trip each on Postgres.
+    league = team_id.split(":", 1)[0]
+    row = next((r for r in all_teams(conn, league) if r["team_id"] == team_id), None)
     if row is None:
         return team_id.split(":")[-1]
     if short:
@@ -684,6 +783,8 @@ def upsert_game(conn: sqlite3.Connection, g: dict[str, Any]) -> None:
     Reuses an existing row for the same fixture when one is present, so a
     second source enriches the game rather than duplicating it.
     """
+    # Any game write can change what a Kalshi-market lookup should find.
+    GAME_LOOKUP_CACHE.clear()
     g = dict(g)
     # Derive the Central slate date when the caller has not stated one, so
     # every row carries the date a person would file the game under and the

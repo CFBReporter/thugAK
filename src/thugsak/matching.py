@@ -521,6 +521,7 @@ def _settle_contested_alias(
                 "WHERE league=? AND alias=? AND source=?",
                 (tid, league, key, "espn"),
             )
+            store.invalidate_name_caches(conn, league)
         return False
 
     # Equal standing: let seniority decide only when the ids say so, and
@@ -536,6 +537,7 @@ def _settle_contested_alias(
     conn.execute(
         "DELETE FROM team_aliases WHERE league=? AND alias=?", (league, key)
     )
+    store.invalidate_name_caches(conn, league)
     return True
 
 
@@ -600,6 +602,8 @@ def drop_ambiguous_aliases(conn: sqlite3.Connection, league: str) -> list[str]:
                 (league, alias),
             )
             dropped.append(f"{league}:{alias} ({len(exact_fits)} teams)")
+    if dropped:
+        store.invalidate_name_caches(conn, league)
     return dropped
 
 
@@ -694,24 +698,12 @@ _FUZZY_CACHE_MAX = 50_000
 
 
 def _teams_fingerprint(conn: sqlite3.Connection, league: str) -> tuple[Any, ...]:
-    # Which database: the SQLite file path, or the Postgres URL + schema.
-    if store.is_postgres(conn):
-        from . import db as _db
-
-        ident = _db.target_key()
-    else:
-        dbl = conn.execute("PRAGMA database_list").fetchone()
-        ident = dbl[2] if dbl else ""
-    # Count, max id and summed lengths catch inserts, deletes and renames --
-    # portable SQL, no SQLite rowid.
-    row = conn.execute(
-        """SELECT COUNT(*), MAX(team_id),
-                  SUM(length(team_id) + length(COALESCE(display_name,''))
-                      + length(canonical) + COALESCE(is_d1, 2))
-           FROM teams WHERE league=?""",
-        (league,),
-    ).fetchone()
-    return (ident, row[0], row[1], row[2])
+    # The teams-table version the store's cache holds: it changes whenever
+    # that cache reloads (a team written through the store, or TTL expiry),
+    # so a fuzzy result can never outlive the teams it was computed from --
+    # and checking it costs no query, where a COUNT per lookup was 302
+    # round trips per slate on a remote database.
+    return store.teams_version(conn, league)
 
 
 def _fuzzy_resolve(
@@ -989,6 +981,32 @@ def _find_game(
     teams: tuple[str, str],
     tolerance_days: int,
 ) -> sqlite3.Row | None:
+    """Memoized `_find_game_query`.
+
+    Every Kalshi market for a game asks this same question -- ~45 markets a
+    game, 406 lookups for a five-game slate -- which over a ~84ms round trip
+    was most of a remote slate load. Cached per database for a short window,
+    and emptied by `store.upsert_game` on any game write, so a newly stored
+    or rescheduled game is never answered from a stale entry.
+    """
+    import time as _time
+
+    key = (store.db_ident(conn), league, date, frozenset(teams), tolerance_days)
+    hit = store.GAME_LOOKUP_CACHE.get(key)
+    if hit is not None and _time.monotonic() - hit[0] < store.GAME_LOOKUP_TTL:
+        return hit[1]
+    row = _find_game_query(conn, league, date, teams, tolerance_days)
+    store.GAME_LOOKUP_CACHE[key] = (_time.monotonic(), row)
+    return row
+
+
+def _find_game_query(
+    conn: sqlite3.Connection,
+    league: str,
+    date: str,
+    teams: tuple[str, str],
+    tolerance_days: int,
+) -> sqlite3.Row | None:
     """Find a game by date window and unordered team pair.
 
     Compared against `slate_date` -- the Central calendar date -- rather than
@@ -1009,17 +1027,15 @@ def _find_game(
     # chose the league-only index and scanned every game in the league, once
     # per Kalshi market (~4s of an NCAAF slate). Each arm below is a direct
     # hit on ix_games_teams. Same rows, same ordering.
+    gap = store.day_gap_sql(conn, "COALESCE(slate_date, substr(start_time,1,10))", "?")
     return conn.execute(
-        """SELECT * FROM (
+        f"""SELECT * FROM (
              SELECT * FROM games WHERE league=? AND home_team=? AND away_team=?
              UNION ALL
              SELECT * FROM games WHERE league=? AND home_team=? AND away_team=?
-           )
+           ) pair
            WHERE COALESCE(slate_date, substr(start_time,1,10)) BETWEEN ? AND ?
-           ORDER BY abs(
-                      julianday(COALESCE(slate_date, substr(start_time,1,10)))
-                      - julianday(?)
-                    )
+           ORDER BY {gap}
            LIMIT 1""",
         (league, a, b, league, b, a, lo, hi, date),
     ).fetchone()
