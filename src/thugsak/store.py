@@ -254,6 +254,22 @@ def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def is_postgres(conn: Any) -> bool:
+    return isinstance(conn, db.PgConnection)
+
+
+def day_gap_sql(conn: Any, a: str, b: str) -> str:
+    """SQL for the absolute number of days between two YYYY-MM-DD expressions.
+
+    The one construct with no common spelling: SQLite has `julianday`,
+    Postgres subtracts dates. `a` and `b` are SQL expressions (a column, or a
+    `?` placeholder), inserted verbatim -- never pass user input as either.
+    """
+    if is_postgres(conn):
+        return f"abs(CAST({a} AS date) - CAST({b} AS date))"
+    return f"abs(julianday({a}) - julianday({b}))"
+
+
 def uses_postgres(path: Path | str = DB_PATH) -> bool:
     """True when this path means "the app's database" and that is Postgres.
 
@@ -641,18 +657,18 @@ def find_existing_game(
     if not date:
         return None
     source = g.get("source")
+    gap = day_gap_sql(conn, "substr(start_time,1,10)", "?")
     row = conn.execute(
-        """SELECT game_id FROM games
+        f"""SELECT game_id FROM games
            WHERE league=? AND home_team=? AND away_team=?
              AND (
                    substr(start_time,1,10) = ?
                    OR (
-                        source IS NOT ?
-                        AND abs(julianday(substr(start_time,1,10))
-                                - julianday(?)) <= ?
+                        source IS DISTINCT FROM ?
+                        AND {gap} <= ?
                       )
                  )
-           ORDER BY abs(julianday(substr(start_time,1,10)) - julianday(?))
+           ORDER BY {gap}
            LIMIT 1""",
         (
             g["league"], g["home_team"], g["away_team"], date,
@@ -1034,7 +1050,8 @@ def save_prediction(conn: sqlite3.Connection, p: dict[str, Any]) -> int:
              (game_id, league, as_of, created_at, pred_home_points,
               pred_away_points, pred_spread, pred_total, model_version,
               payload, matchup, slate_date, home_team, away_team)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           RETURNING pred_id""",
         (
             p["game_id"], p["league"], p["as_of"], utcnow(),
             p.get("pred_home_points"), p.get("pred_away_points"),
@@ -1044,7 +1061,8 @@ def save_prediction(conn: sqlite3.Connection, p: dict[str, Any]) -> int:
             p.get("home_team"), p.get("away_team"),
         ),
     )
-    return int(cur.lastrowid)
+    # RETURNING, not lastrowid: Postgres has no implicit row id.
+    return int(cur.fetchone()[0])
 
 
 def record_bets(
@@ -1194,7 +1212,12 @@ def vacuum(path: Path | str = DB_PATH) -> bool:
     VACUUM needs an exclusive lock, so a reader elsewhere (a Streamlit session,
     another import) will block it. That is pure housekeeping, so a failure is
     reported and swallowed rather than discarding a completed import.
+
+    On Postgres this is a no-op returning False: autovacuum reclaims space on
+    its own, and a manual VACUUM cannot run inside the app's transactions.
     """
+    if uses_postgres(path):
+        return False
     conn = sqlite3.connect(Path(path), timeout=5)
     try:
         conn.execute("VACUUM")
@@ -1206,6 +1229,16 @@ def vacuum(path: Path | str = DB_PATH) -> bool:
 
 
 def db_size_bytes(path: Path | str = DB_PATH) -> int:
+    if uses_postgres(path):
+        # The tables in the schema in use, not the whole cluster: on the
+        # free plan the 500 MB limit is what this number is checked against.
+        with connect(path, readonly=True) as conn:
+            row = conn.execute(
+                """SELECT COALESCE(SUM(pg_total_relation_size(c.oid)), 0)
+                   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                   WHERE n.nspname = current_schema() AND c.relkind = 'r'"""
+            ).fetchone()
+        return int(row[0])
     p = Path(path)
     return p.stat().st_size if p.exists() else 0
 
@@ -1327,9 +1360,11 @@ def replace_depth_chart(
     for position, ids in chart.items():
         for rank, aid in enumerate(ids, start=1):
             conn.execute(
-                """INSERT OR REPLACE INTO depth_chart
+                """INSERT INTO depth_chart
                      (league, team_id, position, athlete_id, rank, as_of)
-                   VALUES (?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?)
+                   ON CONFLICT (league, team_id, position, rank, as_of)
+                   DO UPDATE SET athlete_id = excluded.athlete_id""",
                 (league, team_id, position, str(aid), rank, stamp),
             )
             n += 1
@@ -1415,10 +1450,11 @@ def start_agent_run(
     conn: sqlite3.Connection, agent: str, league: str | None = None
 ) -> int:
     cur = conn.execute(
-        "INSERT INTO agent_runs (agent, league, started_at, status) VALUES (?,?,?,?)",
+        "INSERT INTO agent_runs (agent, league, started_at, status) VALUES (?,?,?,?) "
+        "RETURNING run_id",
         (agent, league, utcnow(), "running"),
     )
-    return int(cur.lastrowid)
+    return int(cur.fetchone()[0])
 
 
 def finish_agent_run(
@@ -1483,16 +1519,19 @@ def trim_player_detail(
     """
     out = {"player_games": 0, "depth_chart": 0, "detail_nulled": 0}
 
+    # Rows are addressed by their primary keys, not SQLite's hidden `rowid`,
+    # so the same statements run on Postgres.
+
     # player_games: each team's `keep` most recent distinct game dates survive.
     cur = conn.execute(
-        """DELETE FROM player_games WHERE rowid IN (
-             SELECT rowid FROM (
-               SELECT rowid,
+        """DELETE FROM player_games WHERE (athlete_id, event_id) IN (
+             SELECT athlete_id, event_id FROM (
+               SELECT athlete_id, event_id,
                       DENSE_RANK() OVER (
                         PARTITION BY team_id ORDER BY date DESC
                       ) rk
                FROM player_games WHERE league=?
-             ) WHERE rk > ?
+             ) ranked WHERE rk > ?
            )""",
         (league, keep),
     )
@@ -1500,32 +1539,33 @@ def trim_player_detail(
 
     # depth_chart: each team's `keep` most recent snapshots survive.
     cur = conn.execute(
-        """DELETE FROM depth_chart WHERE rowid IN (
-             SELECT rowid FROM (
-               SELECT rowid,
+        """DELETE FROM depth_chart WHERE league=? AND (team_id, as_of) IN (
+             SELECT team_id, as_of FROM (
+               SELECT team_id, as_of,
                       DENSE_RANK() OVER (
                         PARTITION BY team_id ORDER BY as_of DESC
                       ) rk
                FROM depth_chart WHERE league=?
-             ) WHERE rk > ?
+             ) ranked WHERE rk > ?
            )""",
-        (league, keep),
+        (league, league, keep),
     )
     out["depth_chart"] = cur.rowcount
 
     # team_game_stats.detail: null beyond the window. The row itself stays --
     # points_for / points_against are the season-level record.
     cur = conn.execute(
-        """UPDATE team_game_stats SET detail=NULL WHERE detail IS NOT NULL AND rowid IN (
-             SELECT rowid FROM (
-               SELECT t.rowid,
+        """UPDATE team_game_stats SET detail=NULL
+           WHERE detail IS NOT NULL AND (game_id, team_id) IN (
+             SELECT game_id, team_id FROM (
+               SELECT t.game_id, t.team_id,
                       ROW_NUMBER() OVER (
                         PARTITION BY t.team_id ORDER BY t.start_time DESC
                       ) rn
                FROM team_game_stats t
                JOIN games g ON g.game_id = t.game_id
                WHERE t.league=? AND g.completed=1
-             ) WHERE rn > ?
+             ) ranked WHERE rn > ?
            )""",
         (league, keep),
     )

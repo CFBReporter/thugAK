@@ -74,6 +74,7 @@ def test_init_db_cleans_legacy_placeholder_rows(db):
         store.upsert_game(conn, _g("g1", 9, 0, 0, 0))
         conn.execute("UPDATE team_game_stats SET points_for=0, points_against=0")
         conn.commit()
+    store._PG_READY.clear()  # re-opening the app is a new process; Postgres init is cached per process
     applied = store.init_db(db)
     assert any("placeholder" in a for a in applied)
     with store.connect(db, readonly=True) as conn:

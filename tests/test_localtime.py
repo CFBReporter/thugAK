@@ -198,6 +198,7 @@ def test_rows_predating_the_backfill_are_stamped_once(db):
         conn.execute("DELETE FROM meta WHERE key='slate_backfill'")
         conn.commit()
 
+    store._PG_READY.clear()  # re-opening the app is a new process; Postgres init is cached per process
     store.init_db(db)
     with store.connect(db) as conn:
         assert store.get_game(conn, "g")["slate_date"] == "2026-11-11"

@@ -136,6 +136,7 @@ def test_legacy_duplicates_are_collapsed_on_open(db):
         conn.commit()
         assert conn.execute("SELECT count(*) c FROM predictions").fetchone()["c"] == 4
 
+    store._PG_READY.clear()  # re-opening the app is a new process; Postgres init is cached per process
     applied = store.init_db(db)
     with store.connect(db) as conn:
         assert conn.execute("SELECT count(*) c FROM predictions").fetchone()["c"] == 1

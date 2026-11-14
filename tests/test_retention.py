@@ -271,6 +271,7 @@ def test_last_agent_run_can_filter_by_status(db):
 # --- schema ----------------------------------------------------------------
 
 
+@pytest.mark.sqlite_only
 def test_init_db_is_idempotent_with_new_tables(db):
     store.init_db(db)
     store.init_db(db)
@@ -282,6 +283,7 @@ def test_init_db_is_idempotent_with_new_tables(db):
         assert t in names
 
 
+@pytest.mark.sqlite_only
 def test_init_db_upgrades_a_pre_agent_database(tmp_path):
     # A database built before these tables existed must gain them on the next
     # init without losing anything.

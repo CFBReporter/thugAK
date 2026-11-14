@@ -17,6 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from thugsak import db, store  # noqa: E402
 from thugsak.config import DB_PATH  # noqa: E402
 
+pytestmark = pytest.mark.no_pg_harness  # tests the backend switch itself
+
 PG = "postgresql://postgres.ref:s3cretPass@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
 
 

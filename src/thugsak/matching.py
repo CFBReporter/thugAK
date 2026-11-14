@@ -694,17 +694,24 @@ _FUZZY_CACHE_MAX = 50_000
 
 
 def _teams_fingerprint(conn: sqlite3.Connection, league: str) -> tuple[Any, ...]:
-    db = conn.execute("PRAGMA database_list").fetchone()
-    # Count and max rowid catch inserts and deletes; the summed name lengths
-    # catch a rename, which an UPDATE would otherwise slip past.
+    # Which database: the SQLite file path, or the Postgres URL + schema.
+    if store.is_postgres(conn):
+        from . import db as _db
+
+        ident = _db.target_key()
+    else:
+        dbl = conn.execute("PRAGMA database_list").fetchone()
+        ident = dbl[2] if dbl else ""
+    # Count, max id and summed lengths catch inserts, deletes and renames --
+    # portable SQL, no SQLite rowid.
     row = conn.execute(
-        """SELECT COUNT(*), MAX(rowid),
-                  SUM(length(COALESCE(display_name,'')) + length(canonical)
-                      + COALESCE(is_d1, 2))
+        """SELECT COUNT(*), MAX(team_id),
+                  SUM(length(team_id) + length(COALESCE(display_name,''))
+                      + length(canonical) + COALESCE(is_d1, 2))
            FROM teams WHERE league=?""",
         (league,),
     ).fetchone()
-    return (db[2] if db else "", row[0], row[1], row[2])
+    return (ident, row[0], row[1], row[2])
 
 
 def _fuzzy_resolve(

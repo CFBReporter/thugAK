@@ -459,7 +459,7 @@ async def audit_data_integrity(
 
         dup = conn.execute(
             """SELECT alias, COUNT(DISTINCT team_id) n FROM team_aliases
-               WHERE league=? GROUP BY alias HAVING n > 1""",
+               WHERE league=? GROUP BY alias HAVING COUNT(DISTINCT team_id) > 1""",
             (league,),
         ).fetchall()
         if dup:
