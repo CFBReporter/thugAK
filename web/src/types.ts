@@ -150,6 +150,49 @@ export interface RecommendationResponse {
   lookback_caveats?: string[]
 }
 
+/** One strike on a spread or total ladder, scored against the model. */
+export interface EdgeRung {
+  ticker: string
+  kind: 'spread' | 'total' | string
+  title: string
+  strike: number | null
+  subject_team: string | null
+  /** Dollars per contract; null when the market has no ask. */
+  ask: number | null
+  fee_per_contract: number | null
+  all_in_cost: number | null
+  model_probability: number | null
+  /** Raw arithmetic. */
+  net_edge: number | null
+  /** Scaled by measured model skill -- rank on this one. */
+  adjusted_edge: number | null
+  ev_per_100_contracts_usd: number | null
+  volume: number | null
+  /** An edge too good to be true is flagged, not promoted. */
+  suspect: boolean
+  notes: string[]
+}
+
+export interface EdgesResponse {
+  game_id: string
+  league: string
+  as_of: string
+  as_of_local: string
+  predicted_spread_home_relative: number | null
+  predicted_total: number | null
+  position_size_contracts: number
+  fee_multipliers: Record<string, number>
+  model_skill: unknown
+  correlated_ladders: unknown
+  ladder_warnings: string[] | null
+  edge_note: string
+  rungs: EdgeRung[]
+  best_bets: string[]
+  arbitrage: unknown
+  warnings: string[]
+  note: string
+}
+
 export interface League {
   key: string
   label: string

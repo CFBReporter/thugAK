@@ -23,6 +23,7 @@ Read-only with respect to Kalshi, exactly as v1: no key, no order endpoints.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -69,8 +70,28 @@ async def _call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         # no exception, because its original caller was Claude reading prose.
         # Over HTTP that arrives as a 200 and the UI renders an empty page, so
         # it is promoted to a real status the front-end already handles.
-        if isinstance(result, dict) and "error" in result and len(result) == 1:
-            raise HTTPException(status_code=404, detail=str(result["error"]))
+        if isinstance(result, dict) and "error" in result:
+            # Two different failures wear the same shape, and they are not the
+            # same thing to a reader:
+            #
+            #   {"error": ...}                      -- no such game
+            #   {"game_id", "error", "warnings"}    -- the game is real, the
+            #                                          model declined to call it
+            #
+            # An earlier version of this check required len(result) == 1, so
+            # the second form sailed through as a 200 carrying none of the
+            # fields the detail view reads. The browser rendered an empty
+            # page with nothing saying why -- the same silent-emptiness
+            # failure the provider seam exists to prevent, reintroduced one
+            # layer up. Any dict carrying "error" is now promoted, and the
+            # engine's own warnings travel with it because they are the only
+            # explanation the user gets.
+            reasons = result.get("warnings") or []
+            detail = str(result["error"])
+            if reasons:
+                detail += " -- " + " ".join(str(w) for w in reasons)
+            resolved = any(k in result for k in ("game_id", "warnings"))
+            raise HTTPException(status_code=422 if resolved else 404, detail=detail)
         return result
     except HTTPException:
         raise
@@ -82,6 +103,16 @@ async def _call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         raise HTTPException(status_code=404, detail=str(exc).strip("'")) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except sqlite3.OperationalError as exc:
+        # The hourly agent cycle writes to the same SQLite file. A lock timeout
+        # is "busy, try again", not a crash, and the UI shows a 503 as such.
+        if "locked" in str(exc).lower():
+            raise HTTPException(
+                status_code=503,
+                detail="The database is busy -- the hourly agents are writing. "
+                       "Retry in a few seconds.",
+            ) from exc
+        raise
 
 
 @app.get("/api/health")
@@ -153,6 +184,23 @@ async def recommendation(
 ) -> Any:
     """The answer: predicted score, one definitive call, and the five bets."""
     return await _call(tools.get_recommendation, league, game_id, contracts=contracts)
+
+
+@app.get("/api/edges")
+async def edges(
+    league: str = Query(...),
+    game_id: str = Query(...),
+    contracts: int = Query(100, ge=1, le=10_000),
+) -> Any:
+    """Every Kalshi ladder strike for a game, scored against the model.
+
+    The one engine tool the bridge did not forward until now. v1's plan called
+    the ladder "the core of the app" and the engine calls it "the actionable
+    table"; it was reachable from Claude and never from the browser. Sixty rows
+    for one game is data, not an answer -- the detail view renders it below
+    the five-slot verdict, not above it.
+    """
+    return await _call(tools.get_edges, league, game_id, contracts=contracts)
 
 
 @app.get("/api/prediction")

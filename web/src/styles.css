@@ -278,3 +278,29 @@ h1 { font-size: 22px; font-weight: 800; letter-spacing: -0.02em; }
   .score-num { font-size: 32px; }
   .vol { min-width: 0; }
 }
+
+/* ---- the ladder --------------------------------------------------------
+   Every spread/total strike for a game. Dense by design: it is a table to
+   compare down a column, not a list to read. Suspect rows are dimmed and
+   flagged rather than hidden; the best-bet rows get a hairline accent. */
+.ladder { margin-top: 12px; }
+.ladder-h {
+  font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--text-faint); margin: 10px 0 6px;
+}
+.ladder-t { width: 100%; border-collapse: collapse; font-size: 13px; }
+.ladder-t th, .ladder-t td {
+  padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left;
+  white-space: nowrap;
+}
+.ladder-t th { color: var(--text-faint); font-weight: 500; font-size: 11px; }
+.ladder-t td.num, .ladder-t th.num { text-align: right; font-family: var(--mono); }
+.ladder-t tr.suspect td { color: var(--text-faint); background: var(--warn-tint); }
+.ladder-t tr.best td { background: var(--accent-tint); }
+.ladder-t .pos { color: var(--yes-hot); }
+.ladder-t .neg { color: var(--no-hot); }
+.ladder-t .muted { color: var(--text-dim); }
+.ladder-title { color: var(--text); }
+@media (max-width: 640px) {
+  .ladder-t { display: block; overflow-x: auto; }
+}

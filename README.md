@@ -54,6 +54,14 @@ then uvicorn alone serves the whole app.
 
 ```
 api/main.py                   HTTP bridge -- no logic, forwards to mcp.tools
+scripts/run_agents.py         the hourly cycle; what Task Scheduler calls
+scripts/register_task.ps1     installs the 07:00-01:00 Central schedule
+scripts/backfill_ncaamb.py    recovers games the history import dropped
+src/thugsak/agents/
+  ingest_tools.py             Agent 1's deterministic tool belt (tested, no LLM)
+  gate.py                     the change signature and the router
+  runner.py                   window, lock, the three SDK loops, agent_runs log
+  prompts.py                  the three system prompts
 src/thugsak/providers/        the game-data seam
   base.py                     GameDataProvider protocol + registry
   espn.py                     default, working
@@ -117,13 +125,94 @@ dependency on a project where dependency freshness is a stated concern.
 ## Tests
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q      # 245
+.venv/Scripts/python.exe -m pytest -q      # 375
 cd web && npm run typecheck
 ```
 
-245 = v1's 228, unchanged, plus 17 on the provider seam. The seam's tests
-assert that a blocked provider raises with a stated reason rather than
-returning empty — the v1 bug worth not repeating was `import_nfl` silently
-dropping teams it could not resolve, which left two NFL clubs with one stored
-game each and the model declining to predict their games with nothing on
-screen explaining why.
+375 = v1's 228, unchanged, plus 17 on the provider seam, 22 on the two
+failures described below, and 108 on the agent layer: retention's boundary,
+the request limiter, the ingest tools against a fake session, the change gate
+in both directions, the SDK type boundary, the injuries parse, and the
+read-only-against-Kalshi assertion.
+
+## The agent layer
+
+Three Claude Agent SDK loops over this project's own MCP tools, run hourly by
+Windows Task Scheduler from 07:00 to 01:00 Central. Nothing waits on a human
+opening a page.
+
+```bash
+.venv/Scripts/python.exe scripts/run_agents.py                   # the scheduled cycle
+.venv/Scripts/python.exe scripts/run_agents.py --dry-run         # gate + routing, no model
+.venv/Scripts/python.exe scripts/run_agents.py --agent ingest --league nba
+powershell -ExecutionPolicy Bypass -File scripts/register_task.ps1   # install the schedule
+```
+
+**The split that makes it trustworthy.** `src/thugsak/agents/ingest_tools.py`
+is deterministic Python over the existing clients, unit-tested with a fake
+session, and produces the same rows every run. The LLM loops in `runner.py`
+decide what to call, notice anomalies, judge ambiguous names, and write the
+report. Numbers the model trusts never depend on an LLM's mood.
+
+**The gate is a router** (`agents/gate.py`). Each cycle computes a change
+signature — new finals, injury-status deltas, winner-price moves past 3¢,
+newly listed markets, volume/OI moves, integrity findings — and diffs it
+against the last run's. Nothing moved: a `no-op` row, no model call. Something
+moved: the diff names *which* agents think, so a price move does not trigger a
+re-ingest. Verified on a live slate: two runs minutes apart produced identical
+digests and a `no-op`.
+
+**Retention has a boundary.** The rolling last-7 applies to per-player and
+box-score *detail* (`player_games`, `depth_chart`, `team_game_stats.detail`).
+Team-level results keep the full season: the fitted blend weights put 0.80 on
+the season window and the ratings solve reads every result, so trimming those
+would silently change the model. `store.trim_player_detail` enforces this and
+never touches `games`.
+
+**Injury snapshots are the quiet prize.** ESPN's report is current-only, which
+is why backtests have run without the injury adjustment. Every change to the
+league report (and a daily heartbeat) is now a full snapshot in
+`injury_snapshots`, never pruned. It does not pay off this season; it is the
+one dataset that cannot be reconstructed later.
+
+**What the first unattended run found.** On an empty Friday NFL slate the
+agents did the right thing — did not widen scope, did not manufacture a bet —
+and surfaced two real bugs: the SDK tool boundary hands integers to handlers
+as strings (`thin_games` arrived as `"4"`; `sdk_server.coerce_args` now casts
+by schema), and the league-wide injuries endpoint carries no `athlete.id` at
+all, so v1's parser had been producing empty ids — 800 injuries, 0 rows
+stored. The id lives only in the player-card URL; `_athlete_id` recovers it.
+The ingest agent also noted it had *considered* editing the source to fix the
+first bug. It could not — write builtins are disallowed — but that it reached
+for them is why they are.
+
+**Authority.** Full autonomy short of betting: agents may repair data, seed
+aliases, run retention. Never an order. `tests/test_kalshi_readonly.py`
+asserts no code path reaches a write endpoint and no API-key plumbing exists.
+
+## Name matching is where this breaks, twice over
+
+The v1 bug worth not repeating was `import_nfl` silently dropping teams it
+could not resolve, which left two NFL clubs with one stored game each and the
+model declining to predict their games with nothing on screen explaining why.
+Both halves of that recurred in NCAAMB, and the tests now pin both.
+
+**The data half.** `import_ncaamb` skips a Barttorvik row when either team
+fails to resolve — correct, since a game credited to the wrong team is worse
+than a missing one, but it means one unresolvable name costs a school its
+*entire* history. Twelve Division I spellings never resolved ("McNeese St."
+against "McNeese Cowboys", "Tennessee Martin" against "UT Martin Skyhawks",
+"Hawaii" against "Hawai'i"), and eight teams ended up with no stored games at
+all. `NAME_OVERRIDES` in `matching.py` now declares them, and
+`scripts/backfill_ncaamb.py` recovers the rows — 958 games, after which every
+D1 team has history. One name is still unmapped on purpose: Barttorvik's
+"Saint Francis" has no team record to point at, and the nearest match is a
+different school.
+
+**The reporting half.** The engine signals "I will not call this game" by
+*returning* `{"error", "warnings"}` rather than raising, because its original
+caller was Claude reading prose. Over HTTP that was a 200 carrying none of the
+fields the detail view reads, so the page rendered empty with nothing saying
+why. It is now a 422 with the engine's own reasons attached, and the UI shows
+them as an explanation rather than a crash. A model that refuses on thin
+history is working correctly; refusing *silently* is the defect.

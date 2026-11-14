@@ -4,6 +4,10 @@ __pycache__/
 data/*.db
 data/*.db-wal
 data/*.db-shm
+data/*.bak-*
+# The hourly agent cycle: its single-instance lock and its per-day logs.
+data/agents.lock
+data/logs/
 .streamlit/secrets.toml
 
 # React front-end

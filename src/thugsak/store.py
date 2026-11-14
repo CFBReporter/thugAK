@@ -71,6 +71,9 @@ CREATE TABLE IF NOT EXISTS games (
 );
 CREATE INDEX IF NOT EXISTS ix_games_league_time ON games(league, start_time);
 CREATE INDEX IF NOT EXISTS ix_games_season ON games(league, season);
+-- Kalshi matching looks a game up by team pair once per market (~45 markets
+-- a game); without this each lookup scanned the table, ~4s per NCAAF slate.
+CREATE INDEX IF NOT EXISTS ix_games_teams ON games(league, home_team, away_team);
 
 -- One row per team per game: the query surface for last-N windows.
 CREATE TABLE IF NOT EXISTS team_game_stats (
@@ -158,6 +161,91 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- ---------------------------------------------------------------------------
+-- Player-level persistence. Before these tables, every player stat was
+-- fetched live per request and discarded: the only durable trace was raw
+-- padded JSON in the HTTP cache, keyed by URL hash and unqueryable by player.
+-- These hold the rolling last-7 detail the plan describes. Team-level results
+-- (`games`, `team_game_stats`) are NOT subject to the 7-game cap -- the fitted
+-- blend weights put 0.80 on the full-season window and the ratings solve reads
+-- every result this season, so capping those would silently change the model.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS players (
+    athlete_id TEXT PRIMARY KEY,
+    league     TEXT NOT NULL,
+    team_id    TEXT NOT NULL,
+    name       TEXT,
+    position   TEXT,
+    source     TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_players_team ON players(league, team_id);
+
+-- One row per player per game, rolling last 7 per team.
+CREATE TABLE IF NOT EXISTS player_games (
+    athlete_id  TEXT NOT NULL,
+    event_id    TEXT NOT NULL,
+    league      TEXT NOT NULL,
+    team_id     TEXT NOT NULL,
+    date        TEXT NOT NULL,
+    opponent    TEXT,
+    home_away   TEXT,
+    result      TEXT,
+    stats       TEXT,
+    source      TEXT,
+    fetched_at  TEXT NOT NULL,
+    PRIMARY KEY (athlete_id, event_id)
+);
+CREATE INDEX IF NOT EXISTS ix_pg_team_date ON player_games(league, team_id, date);
+
+-- Position order per team, snapshotted with an as_of so a later run can tell
+-- whether a backup was already the backup before kickoff.
+CREATE TABLE IF NOT EXISTS depth_chart (
+    league     TEXT NOT NULL,
+    team_id    TEXT NOT NULL,
+    position   TEXT NOT NULL,
+    athlete_id TEXT NOT NULL,
+    rank       INTEGER NOT NULL,
+    as_of      TEXT NOT NULL,
+    PRIMARY KEY (league, team_id, position, rank, as_of)
+);
+CREATE INDEX IF NOT EXISTS ix_depth_team ON depth_chart(league, team_id, as_of);
+
+-- Never pruned. ESPN's injuries endpoint is current-only with no history,
+-- which is why backtests have had to run without the injury adjustment. A
+-- snapshot every run is the one dataset that cannot be reconstructed later.
+CREATE TABLE IF NOT EXISTS injury_snapshots (
+    snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    league      TEXT NOT NULL,
+    team_id     TEXT NOT NULL,
+    athlete_id  TEXT NOT NULL,
+    name        TEXT,
+    position    TEXT,
+    status      TEXT NOT NULL,
+    detail      TEXT,
+    as_of       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_inj_league_asof ON injury_snapshots(league, as_of);
+CREATE INDEX IF NOT EXISTS ix_inj_athlete ON injury_snapshots(athlete_id, as_of);
+
+-- The audit trail that makes autonomy reversible: one row per agent run,
+-- including the no-op runs, so a quiet day reads as "checked, nothing moved"
+-- rather than "did not run".
+CREATE TABLE IF NOT EXISTS agent_runs (
+    run_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent       TEXT NOT NULL,
+    league      TEXT,
+    started_at  TEXT NOT NULL,
+    finished_at TEXT,
+    status      TEXT NOT NULL,
+    signature   TEXT,
+    summary     TEXT,
+    writes      TEXT,
+    error       TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_runs_agent ON agent_runs(agent, started_at);
 """
 
 
@@ -324,7 +412,25 @@ def init_db(path: Path | str = DB_PATH) -> list[str]:
         n = _backfill_slate_dates(conn)
         if n:
             applied.append(f"games.slate_date backfilled ({n} rows, Central)")
+        n = _clear_unfinished_scores(conn)
+        if n:
+            applied.append(f"team_game_stats: cleared placeholder scores on {n} unfinished rows")
         return applied
+
+
+def _clear_unfinished_scores(conn: sqlite3.Connection) -> int:
+    """Null the points on team rows whose game is not final.
+
+    Before `_sync_team_rows` refused them, unplayed fixtures were written with
+    ESPN's 0-0 placeholder. Idempotent: once clean, it matches nothing.
+    """
+    cur = conn.execute(
+        """UPDATE team_game_stats SET points_for=NULL, points_against=NULL
+           WHERE points_for IS NOT NULL AND game_id IN (
+             SELECT game_id FROM games WHERE completed = 0
+           )"""
+    )
+    return cur.rowcount
 
 
 # --------------------------------------------------------------------------
@@ -557,6 +663,10 @@ def upsert_games(conn: sqlite3.Connection, games: Iterable[dict[str, Any]]) -> i
 
 def _sync_team_rows(conn: sqlite3.Connection, g: dict[str, Any]) -> None:
     detail = g.get("detail") or {}
+    # A score on an unfinished game is ESPN's 0-0 placeholder or a live
+    # partial; neither is a result. Team rows get points only once final.
+    if not g.get("completed"):
+        g = {**g, "home_score": None, "away_score": None}
     sides = (
         ("home", g["home_team"], g["away_team"], g.get("home_score"), g.get("away_score")),
         ("away", g["away_team"], g["home_team"], g.get("away_score"), g.get("home_score")),
@@ -674,18 +784,26 @@ def team_games_before(
     on the data.
     """
     _check_asof(as_of)
+    # Joined to `games.completed`, not just "has a score". ESPN's scoreboard
+    # reports 0-0 for a game that has not started, and a game from yesterday
+    # stays 0-0 in the store until something refreshes that date. Filtered on
+    # `points_for IS NOT NULL` alone, those phantom zeros counted as real
+    # games: one in a team's last three dragged NBA predicted totals 20-30
+    # points under the book across a whole slate (Nov 14, 2026).
     q = [
-        """SELECT * FROM team_game_stats
-           WHERE team_id=? AND start_time < ? AND points_for IS NOT NULL"""
+        """SELECT t.* FROM team_game_stats t
+           JOIN games g ON g.game_id = t.game_id
+           WHERE t.team_id=? AND t.start_time < ? AND t.points_for IS NOT NULL
+             AND g.completed = 1"""
     ]
     args: list[Any] = [team_id, as_of]
     if season is not None:
-        q.append("AND season=?")
+        q.append("AND t.season=?")
         args.append(season)
     if home is not None:
-        q.append("AND is_home=?")
+        q.append("AND t.is_home=?")
         args.append(1 if home else 0)
-    q.append("ORDER BY start_time DESC")
+    q.append("ORDER BY t.start_time DESC")
     if limit:
         q.append("LIMIT ?")
         args.append(limit)
@@ -1065,3 +1183,309 @@ def put_meta(conn: sqlite3.Connection, key: str, value: Any) -> None:
 def get_meta(conn: sqlite3.Connection, key: str, default: Any = None) -> Any:
     row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
     return json.loads(row["value"]) if row else default
+
+
+# --------------------------------------------------------------------------
+# players
+# --------------------------------------------------------------------------
+
+def upsert_player(
+    conn: sqlite3.Connection,
+    league: str,
+    athlete_id: str,
+    team_id: str,
+    *,
+    name: str = "",
+    position: str = "",
+    source: str = "espn",
+) -> None:
+    conn.execute(
+        """INSERT INTO players (athlete_id, league, team_id, name, position, source, updated_at)
+           VALUES (?,?,?,?,?,?,?)
+           ON CONFLICT(athlete_id) DO UPDATE SET
+             team_id    = excluded.team_id,
+             name       = COALESCE(NULLIF(excluded.name, ''), players.name),
+             position   = COALESCE(NULLIF(excluded.position, ''), players.position),
+             source     = excluded.source,
+             updated_at = excluded.updated_at""",
+        (athlete_id, league, team_id, name, position, source, utcnow()),
+    )
+
+
+def upsert_player_games(
+    conn: sqlite3.Connection,
+    league: str,
+    athlete_id: str,
+    team_id: str,
+    games: Iterable[Any],
+    *,
+    source: str = "espn",
+) -> int:
+    """Store a player's game log. Each item is a `clients.espn.PlayerGame`
+    or a dict with the same fields. Returns rows written."""
+    now = utcnow()
+    n = 0
+    for g in games:
+        get = g.get if isinstance(g, dict) else lambda k, _g=g: getattr(_g, k, None)
+        event_id = str(get("event_id") or "")
+        date = str(get("date") or "")[:10]
+        if not event_id or not date:
+            continue
+        conn.execute(
+            """INSERT INTO player_games
+                 (athlete_id, event_id, league, team_id, date, opponent,
+                  home_away, result, stats, source, fetched_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(athlete_id, event_id) DO UPDATE SET
+                 team_id    = excluded.team_id,
+                 stats      = COALESCE(excluded.stats, player_games.stats),
+                 result     = COALESCE(excluded.result, player_games.result),
+                 fetched_at = excluded.fetched_at""",
+            (
+                athlete_id, event_id, league, team_id, date,
+                get("opponent"), get("home_away"), get("result"),
+                json.dumps(get("stats") or {}), source, now,
+            ),
+        )
+        n += 1
+    return n
+
+
+def player_games_for_team(
+    conn: sqlite3.Connection, league: str, team_id: str, *, before: str | None = None
+) -> list[sqlite3.Row]:
+    """Stored player-game rows for a team, newest first.
+
+    `before` is the as-of guard: pass the game's kickoff so a lookback cannot
+    read a line that was logged after the game it is predicting.
+    """
+    if before:
+        return conn.execute(
+            """SELECT * FROM player_games WHERE league=? AND team_id=? AND date < ?
+               ORDER BY date DESC""",
+            (league, team_id, before[:10]),
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM player_games WHERE league=? AND team_id=? ORDER BY date DESC",
+        (league, team_id),
+    ).fetchall()
+
+
+def replace_depth_chart(
+    conn: sqlite3.Connection,
+    league: str,
+    team_id: str,
+    chart: dict[str, list[str]],
+    *,
+    as_of: str | None = None,
+) -> int:
+    """Write one depth-chart snapshot: {position: [athlete_id, ...] by rank}."""
+    stamp = as_of or utcnow()
+    n = 0
+    for position, ids in chart.items():
+        for rank, aid in enumerate(ids, start=1):
+            conn.execute(
+                """INSERT OR REPLACE INTO depth_chart
+                     (league, team_id, position, athlete_id, rank, as_of)
+                   VALUES (?,?,?,?,?,?)""",
+                (league, team_id, position, str(aid), rank, stamp),
+            )
+            n += 1
+    return n
+
+
+# --------------------------------------------------------------------------
+# injury snapshots
+# --------------------------------------------------------------------------
+
+def snapshot_injuries(
+    conn: sqlite3.Connection,
+    league: str,
+    rows: Iterable[tuple[str, Any]],
+    *,
+    as_of: str | None = None,
+) -> int:
+    """Append one snapshot. `rows` yields (team_id, Injury-like) pairs.
+
+    Appends rather than replaces: the point of the table is the history.
+    """
+    stamp = as_of or utcnow()
+    n = 0
+    for team_id, inj in rows:
+        get = inj.get if isinstance(inj, dict) else lambda k, _i=inj: getattr(_i, k, None)
+        aid = str(get("athlete_id") or "")
+        status = str(get("status") or "").strip()
+        if not aid or not status:
+            continue
+        conn.execute(
+            """INSERT INTO injury_snapshots
+                 (league, team_id, athlete_id, name, position, status, detail, as_of)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (league, team_id, aid, get("name"), get("position"), status,
+             get("detail"), stamp),
+        )
+        n += 1
+    return n
+
+
+def latest_injury_status(
+    conn: sqlite3.Connection, league: str, *, as_of: str | None = None
+) -> dict[str, str]:
+    """{athlete_id: status} from the most recent snapshot at or before `as_of`.
+
+    This is what the change gate diffs between runs, and what a future
+    backtest can read to know who was listed Out before a past kickoff.
+    """
+    if as_of:
+        row = conn.execute(
+            "SELECT MAX(as_of) m FROM injury_snapshots WHERE league=? AND as_of<=?",
+            (league, as_of),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT MAX(as_of) m FROM injury_snapshots WHERE league=?", (league,)
+        ).fetchone()
+    stamp = row["m"] if row else None
+    if not stamp:
+        return {}
+    return {
+        r["athlete_id"]: r["status"]
+        for r in conn.execute(
+            "SELECT athlete_id, status FROM injury_snapshots WHERE league=? AND as_of=?",
+            (league, stamp),
+        )
+    }
+
+
+def latest_injury_snapshot_time(conn: sqlite3.Connection, league: str) -> str | None:
+    """`as_of` of the most recent snapshot, or None. Drives the daily heartbeat."""
+    row = conn.execute(
+        "SELECT MAX(as_of) m FROM injury_snapshots WHERE league=?", (league,)
+    ).fetchone()
+    return row["m"] if row and row["m"] else None
+
+
+# --------------------------------------------------------------------------
+# agent runs
+# --------------------------------------------------------------------------
+
+def start_agent_run(
+    conn: sqlite3.Connection, agent: str, league: str | None = None
+) -> int:
+    cur = conn.execute(
+        "INSERT INTO agent_runs (agent, league, started_at, status) VALUES (?,?,?,?)",
+        (agent, league, utcnow(), "running"),
+    )
+    return int(cur.lastrowid)
+
+
+def finish_agent_run(
+    conn: sqlite3.Connection,
+    run_id: int,
+    status: str,
+    *,
+    signature: str | None = None,
+    summary: Any = None,
+    writes: Any = None,
+    error: str | None = None,
+) -> None:
+    conn.execute(
+        """UPDATE agent_runs SET finished_at=?, status=?, signature=?,
+                                 summary=?, writes=?, error=?
+           WHERE run_id=?""",
+        (
+            utcnow(), status, signature,
+            json.dumps(summary) if summary is not None else None,
+            json.dumps(writes) if writes is not None else None,
+            error, run_id,
+        ),
+    )
+
+
+def last_agent_run(
+    conn: sqlite3.Connection, agent: str, *, statuses: Sequence[str] | None = None
+) -> sqlite3.Row | None:
+    if statuses:
+        marks = ",".join("?" * len(statuses))
+        return conn.execute(
+            f"SELECT * FROM agent_runs WHERE agent=? AND status IN ({marks}) "
+            "ORDER BY started_at DESC LIMIT 1",
+            (agent, *statuses),
+        ).fetchone()
+    return conn.execute(
+        "SELECT * FROM agent_runs WHERE agent=? ORDER BY started_at DESC LIMIT 1",
+        (agent,),
+    ).fetchone()
+
+
+# --------------------------------------------------------------------------
+# retention: the rolling-7 for DETAIL ONLY
+# --------------------------------------------------------------------------
+
+def trim_player_detail(
+    conn: sqlite3.Connection, league: str, keep: int = 7
+) -> dict[str, int]:
+    """Apply the rolling last-`keep` rule to per-player and box-score detail.
+
+    This is deliberately NOT `trim_to_rolling`, which deletes `games` rows.
+    The 7-game cap applies to the heavy detail -- player game logs, depth-chart
+    snapshots, and the box-score blob in `team_game_stats.detail` -- while the
+    team-level results stay for the whole season. The fitted blend weights put
+    0.80 on the season window and the ratings solve reads every result this
+    season; trimming those would collapse "season" into "last 7" and quietly
+    replace the dominant term of a calibrated model. So `games` and
+    `team_game_stats` rows are never touched here: only the `detail` column is
+    nulled, and only beyond each team's most recent `keep` completed games.
+
+    Returns counts of what was removed, for the agent-run log.
+    """
+    out = {"player_games": 0, "depth_chart": 0, "detail_nulled": 0}
+
+    # player_games: each team's `keep` most recent distinct game dates survive.
+    cur = conn.execute(
+        """DELETE FROM player_games WHERE rowid IN (
+             SELECT rowid FROM (
+               SELECT rowid,
+                      DENSE_RANK() OVER (
+                        PARTITION BY team_id ORDER BY date DESC
+                      ) rk
+               FROM player_games WHERE league=?
+             ) WHERE rk > ?
+           )""",
+        (league, keep),
+    )
+    out["player_games"] = cur.rowcount
+
+    # depth_chart: each team's `keep` most recent snapshots survive.
+    cur = conn.execute(
+        """DELETE FROM depth_chart WHERE rowid IN (
+             SELECT rowid FROM (
+               SELECT rowid,
+                      DENSE_RANK() OVER (
+                        PARTITION BY team_id ORDER BY as_of DESC
+                      ) rk
+               FROM depth_chart WHERE league=?
+             ) WHERE rk > ?
+           )""",
+        (league, keep),
+    )
+    out["depth_chart"] = cur.rowcount
+
+    # team_game_stats.detail: null beyond the window. The row itself stays --
+    # points_for / points_against are the season-level record.
+    cur = conn.execute(
+        """UPDATE team_game_stats SET detail=NULL WHERE detail IS NOT NULL AND rowid IN (
+             SELECT rowid FROM (
+               SELECT t.rowid,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY t.team_id ORDER BY t.start_time DESC
+                      ) rn
+               FROM team_game_stats t
+               JOIN games g ON g.game_id = t.game_id
+               WHERE t.league=? AND g.completed=1
+             ) WHERE rn > ?
+           )""",
+        (league, keep),
+    )
+    out["detail_nulled"] = cur.rowcount
+    return out

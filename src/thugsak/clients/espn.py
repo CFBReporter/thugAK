@@ -22,6 +22,8 @@ one upstream change degrades a panel instead of breaking a game view.
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -174,6 +176,31 @@ class Game:
             status=st.get("name", "") or "",
             lines=lines,
         )
+
+
+_ID_IN_HREF = re.compile(r"/id/(\d+)(?:/|$)")
+
+
+def _athlete_id(ath: dict[str, Any]) -> str:
+    """An athlete's ESPN id from either payload shape.
+
+    The per-game `summary` endpoint puts it at `athlete.id`. The league-wide
+    `/injuries` endpoint does not carry an `id` field on the athlete at all --
+    the only place it appears is inside the player-card URL in `links`, as
+    `/id/3886633/`. That difference went unnoticed because the injury model
+    reads `summary`; the league-wide report silently produced empty ids, and
+    the first unattended ingest wrote zero injury rows for 800 injuries. Same
+    technique as the depth-chart and D1-group parsers, which pull ids out of
+    `$ref` URLs rather than issuing a request per player.
+    """
+    aid = ath.get("id")
+    if aid:
+        return str(aid)
+    for link in ath.get("links") or []:
+        m = _ID_IN_HREF.search(str(link.get("href") or ""))
+        if m:
+            return m.group(1)
+    return ""
 
 
 @dataclass
@@ -449,12 +476,17 @@ class EspnClient:
             items = []
             for i in block.get("injuries") or []:
                 ath = i.get("athlete") or {}
+                details = i.get("details") or {}
+                detail = details.get("detail") or details.get("type") or ""
+                if details.get("returnDate"):
+                    detail = f"{detail} (return {details['returnDate']})".strip()
                 items.append(
                     Injury(
-                        athlete_id=str(ath.get("id", "")),
+                        athlete_id=_athlete_id(ath),
                         name=ath.get("displayName") or "",
                         position=((ath.get("position") or {}) or {}).get("abbreviation") or "",
                         status=i.get("status") or "",
+                        detail=detail,
                         team_abbrev=abbrev,
                     )
                 )

@@ -28,6 +28,7 @@ Two further rules this module follows:
 
 from __future__ import annotations
 
+import functools
 import re
 import sqlite3
 import unicodedata
@@ -183,6 +184,11 @@ def _fold_accents(s: str) -> str:
 _PARENTHETICAL = re.compile(r"\s*\([^)]*\)")
 
 
+# Cached because it is pure and called in a tight loop: fuzzy matching
+# re-normalises every alias of every team for each unresolved name, which on
+# the ~760-team NCAAF table was 5.8 million calls (~175s) for one slate load
+# over a few thousand distinct strings.
+@functools.lru_cache(maxsize=131072)
 def _norm(name: str, *, strip_parens: bool = False) -> str:
     """Canonical form of a team name.
 
@@ -232,8 +238,12 @@ NAME_OVERRIDES: dict[str, dict[str, str]] = {
         "texas christian": "TCU",
         "brigham young": "BYU",
         "virginia commonwealth": "VCU",
+        # Only the normalised spelling is reachable: `resolve_team` runs
+        # `_norm` before this lookup, and `_expand_st` turns "st" into
+        # "saint", so a key written "st josephs" could never be hit. The
+        # unreachable twins of these two were removed rather than left
+        # looking like coverage they did not provide.
         "saint josephs": "JOES",
-        "st josephs": "JOES",
         "massachusetts": "MASS",
         "detroit mercy": "DET",
         "saint peters": "STPT",
@@ -247,7 +257,6 @@ NAME_OVERRIDES: dict[str, dict[str, str]] = {
         "arkansas pine bluff": "UAPB",
         "illinois chicago": "UIC",
         "nebraska omaha": "OMA",
-        "st thomas": "STT",
         "saint thomas": "STT",
     },
     "ncaaf": {
@@ -268,6 +277,51 @@ NAME_OVERRIDES: dict[str, dict[str, str]] = {
 # bridge the gap: its men's basketball entry for Appalachian State is "App
 # State Mountaineers", and every other source spells it out.
 NAME_OVERRIDES["ncaamb"]["appalachian state"] = "APP"
+
+# Barttorvik spellings that no rule reaches, each found by counting how often
+# a name failed to resolve across three seasons of `super_sked`. Every entry
+# below appeared 65+ times -- a full Division I schedule -- and each cost its
+# school *all* of its stored history, because `import_ncaamb` drops a row when
+# either side is unknown. Eight teams ended up with no scoring history at all,
+# so the model declined to predict any of their games: the UC Riverside at
+# San Jose State fixture came back as an empty screen with the data sitting
+# unread in the source file.
+#
+# The divergence differs in each case, which is why no single normalisation
+# rule fixes them: "St." meaning "State" rather than "Saint" (McNeese,
+# Grambling, Nicholls, Sam Houston); a truncated field in the source itself
+# ("Texas A&M Corpus Chris"); ESPN leading with the system abbreviation
+# ("UT Martin", "UAlbany", and "South Carolina Upstate" against "USC
+# Upstate"); a dropped okina ("Hawai'i"); and an abbreviated compass point
+# ("SE Louisiana" against "Southeastern Louisiana").
+#
+# Keys are the *normalised* form, which is what `resolve_team` looks up, so
+# "McNeese St." is keyed "mcneese state" after `_expand_st`.
+NAME_OVERRIDES["ncaamb"].update(
+    {
+        "mcneese state": "MCN",
+        "texas a and m corpus chris": "AMCC",
+        "grambling state": "GRAM",
+        "nicholls state": "NICH",
+        "tennessee martin": "UTM",
+        "hawaii": "HAW",
+        "southeastern louisiana": "SELA",
+        "sam houston state": "SHSU",
+        "usc upstate": "UPST",
+        "cal baptist": "CBU",
+        # Barttorvik's bare "Albany" is the Division I school. The only other
+        # Albany in the table is a non-D1 branch campus, so this is a
+        # disambiguation rather than a spelling fix.
+        "albany": "UALB",
+    }
+)
+
+# Deliberately absent: Barttorvik's "Saint Francis", which appears 65 times.
+# Saint Francis (PA) is Division I but has no record in the teams table at
+# all, so there is nothing to point an override at -- and the nearest name
+# present, "San Francisco Dons", is a different school. Mapping it would
+# credit one team's games to another, which is worse than the games staying
+# dropped. That one needs the team registered first.
 
 # The same schools play both college sports, so an override worked out for
 # one applies to the other. Football's table was a near-empty subset of
@@ -344,6 +398,7 @@ _DROP = {
 }
 
 
+@functools.lru_cache(maxsize=131072)
 def name_tokens(name: str, *, loose: bool = True) -> frozenset[str]:
     """Comparable words in a name.
 
@@ -629,7 +684,43 @@ def resolve_team(
     return None
 
 
+# Fuzzy results depend only on the teams table, so they are cached against a
+# fingerprint of it. A slate load used to fuzzy-match the same few hundred
+# unmatched Kalshi names ~3,800 times, each a scan of every team in the league
+# (~17s of an NCAAF slate). Adding or changing a team changes the fingerprint,
+# which discards the cache -- there is no way for it to serve a stale answer.
+_FUZZY_CACHE: dict[tuple[Any, ...], str | None] = {}
+_FUZZY_CACHE_MAX = 50_000
+
+
+def _teams_fingerprint(conn: sqlite3.Connection, league: str) -> tuple[Any, ...]:
+    db = conn.execute("PRAGMA database_list").fetchone()
+    # Count and max rowid catch inserts and deletes; the summed name lengths
+    # catch a rename, which an UPDATE would otherwise slip past.
+    row = conn.execute(
+        """SELECT COUNT(*), MAX(rowid),
+                  SUM(length(COALESCE(display_name,'')) + length(canonical)
+                      + COALESCE(is_d1, 2))
+           FROM teams WHERE league=?""",
+        (league,),
+    ).fetchone()
+    return (db[2] if db else "", row[0], row[1], row[2])
+
+
 def _fuzzy_resolve(
+    conn: sqlite3.Connection, league: str, name: str, *, loose: bool
+) -> str | None:
+    key = (_teams_fingerprint(conn, league), league, name, loose)
+    if key in _FUZZY_CACHE:
+        return _FUZZY_CACHE[key]
+    hit = _fuzzy_resolve_uncached(conn, league, name, loose=loose)
+    if len(_FUZZY_CACHE) >= _FUZZY_CACHE_MAX:
+        _FUZZY_CACHE.clear()
+    _FUZZY_CACHE[key] = hit
+    return hit
+
+
+def _fuzzy_resolve_uncached(
     conn: sqlite3.Connection, league: str, name: str, *, loose: bool
 ) -> str | None:
     """Best team for a name by token containment, or None if ambiguous.
@@ -907,17 +998,23 @@ def _find_game(
     lo = (d0 - timedelta(days=tolerance_days)).strftime("%Y-%m-%d")
     hi = (d0 + timedelta(days=tolerance_days)).strftime("%Y-%m-%d")
     a, b = teams
+    # Two exact-pair arms rather than one OR: with the OR, SQLite's planner
+    # chose the league-only index and scanned every game in the league, once
+    # per Kalshi market (~4s of an NCAAF slate). Each arm below is a direct
+    # hit on ix_games_teams. Same rows, same ordering.
     return conn.execute(
-        """SELECT * FROM games
-           WHERE league=?
-             AND COALESCE(slate_date, substr(start_time,1,10)) BETWEEN ? AND ?
-             AND ((home_team=? AND away_team=?) OR (home_team=? AND away_team=?))
+        """SELECT * FROM (
+             SELECT * FROM games WHERE league=? AND home_team=? AND away_team=?
+             UNION ALL
+             SELECT * FROM games WHERE league=? AND home_team=? AND away_team=?
+           )
+           WHERE COALESCE(slate_date, substr(start_time,1,10)) BETWEEN ? AND ?
            ORDER BY abs(
                       julianday(COALESCE(slate_date, substr(start_time,1,10)))
                       - julianday(?)
                     )
            LIMIT 1""",
-        (league, lo, hi, a, b, b, a, date),
+        (league, a, b, league, b, a, lo, hi, date),
     ).fetchone()
 
 

@@ -58,8 +58,51 @@ granted, fill in `RealProvider` against whatever was actually granted and set
 `PERMISSION_ON_FILE = True`.
 
 This project already treats terms as binding — Sports-Reference was excluded
-from v1 for the same reason, and Barttorvik adopted in its place. Treating
-Real differently would be inconsistent, not bolder.
+from v1 on terms grounds too (the specific clause is below), and Barttorvik
+adopted in its place. Treating Real differently would be inconsistent, not
+bolder.
+
+## Sports-Reference — excluded, for a narrower reason than v1 recorded
+
+Re-checked 2026-11-12 against the live Terms
+(<https://www.sports-reference.com/termsofuse.html>, last updated
+2023-05-19), `robots.txt` and `data_use.html`, because v1's plan said only
+"ToS prohibits scraping" and that turned out to be imprecise in a way that
+matters.
+
+**Their automated-access clause is conditional.** Section 5 forbids using
+"scripts, bots, scrapers, data miners, or similar software" only *"in a
+manner that adversely impacts site performance or access"* and without
+written permission. Polite, rate-limited fetching is therefore not, by
+itself, the violation.
+
+**Clause 11 is unconditional, and it names this architecture.** The same
+section prohibits using the site *"for purposes of training, fine-tuning,
+prompting, or instructing artificial intelligence models."* The agent layer
+in this project is Claude reading box scores and reasoning over them — that
+is "prompting or instructing an AI model" in plain words. `robots.txt`
+`Disallow: /` for GPTBot is consistent with the intent. Their custom-data
+route starts at a stated **$5,000 minimum**, and `data_use.html` says of some
+datasets that their own licences "completely preclude any redistribution".
+
+**It would not have filled the gap anyway.** Sports-Reference is a
+historical archive: box scores, team game logs, per-player game logs, all
+excellent. It carries **no injury status and no depth charts** — the two
+forward-looking inputs the injury model depends on and the two things ESPN
+uniquely supplies. `robots.txt` also disallows the `/cbb/players/*/splits/*`
+and `/cfb/players/*/splits/*` paths, which are the per-player breakdowns most
+worth having for college.
+
+**What is permitted, and used:** their Section 5 guiding principle says
+"sharing, using, modifying, repackaging, or publishing data found on
+individual SRL webpages is welcomed" with attribution. A person reading a page
+to sanity-check a number is fine. An automated feed into an agent is not, and
+there is no adapter.
+
+**Where the player data comes from instead:** ESPN's existing verified
+endpoints (`player_gamelog`, `depth_chart`, `injuries`, `summary` box scores)
+plus nflverse's player-level files (`stats_player_week_*`, rosters, snap
+counts), which are open data and already a dependency.
 
 ## Alternatives with terms that permit programmatic use
 

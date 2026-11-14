@@ -41,7 +41,7 @@ def _wrap(spec: dict[str, Any], tool_decorator: Any) -> Any:
     @tool_decorator(spec["name"], spec["description"], properties)
     async def _run(args: dict[str, Any]) -> dict[str, Any]:
         try:
-            result = await handler(**(args or {}))
+            result = await handler(**coerce_args(args or {}, properties))
         except Exception as e:
             result = {"error": f"{type(e).__name__}: {e}", "tool": spec["name"]}
         return {
@@ -54,6 +54,49 @@ def _wrap(spec: dict[str, Any], tool_decorator: Any) -> Any:
         }
 
     return _run
+
+
+def coerce_args(args: dict[str, Any], properties: dict[str, Any]) -> dict[str, Any]:
+    """Cast each argument to the type its schema declares.
+
+    The SDK's `@tool` decorator receives the schema but, in practice, hands
+    the handler integers and booleans as strings -- `thin_games` arrived as
+    `"4"` and `0 < n <= "4"` raised TypeError inside the audit, which the
+    ingest agent then reported as a crash in its first unattended run. The
+    stdio adapter never had this problem because it synthesises a typed
+    signature; this is the equivalent for the in-process path.
+
+    Unknown keys pass through untouched so a handler's own validation still
+    sees them. A value that cannot be cast is left as-is for the same reason:
+    the handler's error names the argument, a cast error here would not.
+    """
+    out: dict[str, Any] = {}
+    for k, v in args.items():
+        spec = properties.get(k) or {}
+        t = spec.get("type")
+        if v is None or t is None:
+            out[k] = v
+            continue
+        try:
+            if t == "integer" and not isinstance(v, bool):
+                out[k] = int(v) if not isinstance(v, int) else v
+            elif t == "number":
+                out[k] = float(v) if not isinstance(v, (int, float)) else v
+            elif t == "boolean":
+                if isinstance(v, str):
+                    out[k] = v.strip().lower() in ("1", "true", "yes", "y", "on")
+                else:
+                    out[k] = bool(v)
+            elif t == "array" and isinstance(v, str):
+                parsed = json.loads(v)
+                out[k] = parsed if isinstance(parsed, list) else [parsed]
+            elif t == "object" and isinstance(v, str):
+                out[k] = json.loads(v)
+            else:
+                out[k] = v
+        except (TypeError, ValueError):
+            out[k] = v
+    return out
 
 
 def allowed_tool_names() -> list[str]:

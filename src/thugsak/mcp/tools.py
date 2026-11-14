@@ -287,6 +287,11 @@ async def list_games(
             # finished, so the record accrues as a side effect of browsing
             # rather than needing a job nobody remembers to run.
             store.settle_predictions(conn, league)
+            # Commit before market matching: that step is slow and network
+            # bound, and an open write here held the SQLite lock across it --
+            # every other writer (the agent cycle, the next click) waited out
+            # the 60s busy timeout and failed with "database is locked".
+            conn.commit()
             rows = store.games_on_date(conn, league, date)
             by_game, unmatched = await _league_markets(conn, client, league)
             # Kalshi lists two weeks of events at once, so restrict the
@@ -1801,3 +1806,12 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
 ]
+
+# Agent 1's deterministic tools live in their own module and register here,
+# so `TOOL_SCHEMAS` stays the single list both MCP adapters iterate. The import
+# sits at the bottom because `ingest_tools` reaches back into this module
+# (lazily, inside `ingest_slate`) for `list_games`; a top-of-file import would
+# be a cycle.
+from ..agents.ingest_tools import INGEST_TOOL_SCHEMAS  # noqa: E402
+
+TOOL_SCHEMAS.extend(INGEST_TOOL_SCHEMAS)

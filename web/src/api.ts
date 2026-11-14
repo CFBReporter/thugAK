@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type {
+  EdgesResponse,
   GamesResponse,
   HealthResponse,
   LeaguesResponse,
@@ -46,6 +47,9 @@ export const api = {
     get<GamesResponse>('games', { league, date }, signal),
   recommendation: (league: string, gameId: string, signal?: AbortSignal) =>
     get<RecommendationResponse>('recommendation', { league, game_id: gameId }, signal),
+  /** Every ladder strike for a game, scored against the model. */
+  edges: (league: string, gameId: string, signal?: AbortSignal) =>
+    get<EdgesResponse>('edges', { league, game_id: gameId }, signal),
 }
 
 export interface Async<T> {

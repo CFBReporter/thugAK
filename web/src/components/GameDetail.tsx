@@ -2,6 +2,7 @@ import { api, useAsync } from '../api'
 import { pct, points, usdExact } from '../format'
 import type { GameRow } from '../types'
 import { BetRow } from './BetRow'
+import { LadderCard } from './Ladder'
 import { Card, Failed, MoneyBar, Skeletons } from './bits'
 
 /**
@@ -161,17 +162,31 @@ export function GameDetail({
             </div>
           </Card>
 
+          {/* ---- the ladder ---- */}
+          {/* Below the verdict on purpose: sixty strikes are one disagreement
+              with the market repeated, not sixty opportunities. Only fetched
+              when Kalshi actually lists spread/total ladders for this game. */}
+          {game.has_ladders ? <LadderCard league={league} gameId={game.game_id} /> : null}
+
           {/* ---- caveats ---- */}
           {data.warnings.length > 0 ||
           data.prediction_cautions.length > 0 ||
           data.lookback_caveats?.length ? (
             <Card title="Worth knowing">
               <div className="note" style={{ display: 'grid', gap: 8 }}>
-                {[
-                  ...data.prediction_cautions,
-                  ...data.warnings,
-                  ...(data.lookback_caveats ?? []),
-                ].map((w, i) => (
+                {/* Deduplicated: `prediction_cautions` and `warnings` overlap,
+                    because a caution the prediction raises is also a warning
+                    about the bet built on it. Concatenated raw, the thin-history
+                    note and the model-vs-market disagreement each appeared
+                    twice, which reads as two separate problems rather than one
+                    stated once. */}
+                {Array.from(
+                  new Set([
+                    ...data.prediction_cautions,
+                    ...data.warnings,
+                    ...(data.lookback_caveats ?? []),
+                  ]),
+                ).map((w, i) => (
                   <p key={i}>{w}</p>
                 ))}
               </div>

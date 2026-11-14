@@ -84,11 +84,14 @@ def _team_history(conn, league: str) -> dict[str, list[dict[str, Any]]]:
     """
     hist: dict[str, list[dict[str, Any]]] = {}
     rows = conn.execute(
-        """SELECT team_id, opponent_id, start_time, is_home, neutral_site,
-                  season, points_for, points_against
-           FROM team_game_stats
-           WHERE league=? AND points_for IS NOT NULL
-           ORDER BY team_id, start_time""",
+        # Completed games only: an unplayed fixture carries ESPN's 0-0
+        # placeholder, and fitting on it teaches the model teams score zero.
+        """SELECT t.team_id, t.opponent_id, t.start_time, t.is_home,
+                  t.neutral_site, t.season, t.points_for, t.points_against
+           FROM team_game_stats t
+           JOIN games g ON g.game_id = t.game_id
+           WHERE t.league=? AND t.points_for IS NOT NULL AND g.completed = 1
+           ORDER BY t.team_id, t.start_time""",
         (league,),
     )
     for r in rows:

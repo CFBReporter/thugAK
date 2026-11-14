@@ -83,14 +83,45 @@ export function Failed({
   error: string
   status: number | null
 }) {
-  // A 503 is a data provider declining to be used, and its message explains
-  // what would have to change. That is information, not a crash, so it is
-  // shown as written rather than behind a generic failure message.
+  // Two statuses here are information rather than breakage, and styling them
+  // as errors would be a lie about what happened:
+  //
+  //   503 -- a data provider declining to be used; the message says what
+  //          would have to change to enable it.
+  //   422 -- the game is real and the engine read it fine, but it will not
+  //          put a number on it, and it says why. A model that refuses on
+  //          thin history is working correctly; the failure worth fixing is
+  //          refusing *silently*, which is what this screen used to do.
+  //
+  // The engine's reasons arrive joined with ' -- ', split back out so each
+  // reads as its own point instead of one run-on line.
+  const declined = status === 422
   const blocked = status === 503
+  const soft = declined || blocked
+  const [head, ...reasons] = error.split(' -- ')
   return (
-    <div className={`state ${blocked ? '' : 'err'}`}>
-      <h2>{blocked ? 'That data source is switched off' : 'Could not load that'}</h2>
-      <p>{error}</p>
+    <div className={`state ${soft ? '' : 'err'}`}>
+      <h2>
+        {declined
+          ? 'No prediction for this game'
+          : blocked
+            ? 'That data source is switched off'
+            : 'Could not load that'}
+      </h2>
+      <p>{declined ? head : error}</p>
+      {declined && reasons.length > 0 ? (
+        <div className="note" style={{ display: 'grid', gap: 8, marginTop: 12, textAlign: 'left' }}>
+          {reasons.map((r, i) => (
+            <p key={i}>{r}</p>
+          ))}
+        </div>
+      ) : null}
+      {declined ? (
+        <p className="note" style={{ marginTop: 12 }}>
+          The market numbers on the slate are still live &mdash; it is the model&rsquo;s own
+          forecast that is missing, so there is nothing to compare them against.
+        </p>
+      ) : null}
     </div>
   )
 }

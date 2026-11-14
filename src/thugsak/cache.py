@@ -119,6 +119,52 @@ BACKOFF_BASE = 1.5
 RETRY_STATUS = {429, 500, 502, 503, 504}
 
 
+# --------------------------------------------------------------------------
+# concurrency limiter
+# --------------------------------------------------------------------------
+#
+# Until this existed every fetch path was strictly serial -- one game view
+# already fired up to 32 requests one after another, and an hourly agent run
+# over a slate is a few hundred. Serial, that is minutes to hours. Unbounded
+# `asyncio.gather` is the opposite failure: ESPN and Kalshi both throttle, and
+# a burst of 300 turns into a burst of 429s and the retry loop above.
+#
+# So: a bounded number of requests in flight at once. The slot is held only
+# around the network call itself, never around a cache hit and never across a
+# backoff sleep, so a throttled request does not pin a slot while it waits.
+#
+# One semaphore per running event loop rather than one module global:
+# Streamlit runs each call on a fresh loop in a daemon thread, tests call
+# `asyncio.run` repeatedly, and a Semaphore bound to a dead loop raises.
+MAX_CONCURRENCY = 5
+_limiters: dict[int, asyncio.Semaphore] = {}
+_limit = MAX_CONCURRENCY
+
+
+def set_concurrency(n: int) -> None:
+    """Change the in-flight bound. Takes effect for loops created afterwards
+    and for the current loop's limiter on its next acquisition cycle."""
+    global _limit
+    if n < 1:
+        raise ValueError("concurrency must be at least 1")
+    _limit = n
+    _limiters.clear()
+
+
+def _limiter() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    key = id(loop)
+    sem = _limiters.get(key)
+    if sem is None:
+        sem = asyncio.Semaphore(_limit)
+        _limiters[key] = sem
+    return sem
+
+
+def in_flight_bound() -> int:
+    return _limit
+
+
 async def fetch_json(
     client: httpx.AsyncClient,
     url: str,
@@ -142,7 +188,10 @@ async def fetch_json(
     last_exc: Exception | None = None
     for attempt in range(max_retries):
         try:
-            r = await client.get(url, params=params, timeout=DEFAULT_TIMEOUT)
+            # The slot covers only the request. A backoff sleep below runs
+            # outside it, so a throttled call does not hold up the others.
+            async with _limiter():
+                r = await client.get(url, params=params, timeout=DEFAULT_TIMEOUT)
             if r.status_code in RETRY_STATUS and attempt < max_retries - 1:
                 delay = _retry_delay(r, attempt)
                 await asyncio.sleep(delay)
@@ -191,7 +240,8 @@ async def fetch_text(
     hit = get(url, None, ttl)
     if hit is not None:
         return hit[0]
-    r = await client.get(url, timeout=120.0, follow_redirects=True)
+    async with _limiter():
+        r = await client.get(url, timeout=120.0, follow_redirects=True)
     r.raise_for_status()
     text = r.text
     put(url, None, text, 200)
