@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import db
 from .config import DB_PATH
 from .localtime import day_bounds_utc, local_date
 
@@ -253,16 +254,29 @@ def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def uses_postgres(path: Path | str = DB_PATH) -> bool:
+    """True when this path means "the app's database" and that is Postgres.
+
+    Only the default path is redirected. An explicit other path -- every test
+    fixture, a scratch copy, a backup -- is always a SQLite file, so the test
+    suite can never touch the production database by accident.
+    """
+    return Path(path) == Path(DB_PATH) and db.backend() == "postgres"
+
+
 @contextmanager
 def connect(path: Path | str = DB_PATH, *, readonly: bool = False):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # A generous busy timeout: imports write in batches while making slow
-    # HTTP calls, and a reader should wait rather than fail.
-    conn = sqlite3.connect(path, timeout=60)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
+    if uses_postgres(path):
+        conn: Any = db.connect_postgres()
+    else:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # A generous busy timeout: imports write in batches while making slow
+        # HTTP calls, and a reader should wait rather than fail.
+        conn = sqlite3.connect(path, timeout=60)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
     try:
         yield conn
         if not readonly:
@@ -402,6 +416,14 @@ POST_MIGRATION_INDEXES = (
 
 def init_db(path: Path | str = DB_PATH) -> list[str]:
     """Create the schema if absent, then apply any pending column additions."""
+    if uses_postgres(path):
+        # The SQLite schema script and migrations must never run against
+        # Postgres: half of it would apply before the first SQLite-only
+        # construct failed. Postgres gets a versioned migration (phase 2).
+        raise NotImplementedError(
+            "Postgres schema is not created by init_db; run the Postgres "
+            "migration (phase 2). Set THUGSAK_DATABASE_URL= to use SQLite."
+        )
     with connect(path) as conn:
         conn.executescript(SCHEMA)
         applied = _migrate(conn)
