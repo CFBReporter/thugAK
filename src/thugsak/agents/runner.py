@@ -37,7 +37,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from .. import store
+from .. import cache, store
 from ..config import DATA_DIR, DB_PATH, LEAGUES, league as get_league
 from ..localtime import now_local, today_local
 from . import gate, ingest_tools, prompts
@@ -376,6 +376,16 @@ async def run_auto(
     try:
         return await _run_cycle(leagues, date, force=force, dry_run=dry_run, db=db, summary=summary)
     finally:
+        # Trim the HTTP cache every cycle, not only in the daily tier: one
+        # day of fetching (Kalshi trade histories, college player game logs,
+        # game summaries) reached 2 GB against a 150 MB target. Only for the
+        # real database -- tests pass their own path and must not touch the
+        # real cache file.
+        if Path(db) == Path(DB_PATH) and not dry_run:
+            try:
+                cache.trim()
+            except Exception:
+                pass
         lock.__exit__(None, None, None)
 
 
