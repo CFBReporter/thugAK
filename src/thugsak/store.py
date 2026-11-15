@@ -560,7 +560,12 @@ NAME_CACHE_TTL = 300.0
 # matching._find_game memo; cleared by upsert_game. Short TTL as a backstop
 # for game writes made by another process.
 GAME_LOOKUP_CACHE: dict[tuple[Any, ...], tuple[float, Any]] = {}
-GAME_LOOKUP_TTL = 60.0
+# matching.preload_games: (loaded_at, lo, hi, {team pair: [rows]}) per league.
+GAME_INDEX: dict[tuple[str, str], tuple[float, str, str, dict[Any, list[Any]]]] = {}
+# Five minutes, like the name caches: page loads write no games, so between
+# hourly agent runs nothing in-process changes these; the TTL bounds how long
+# another process's write (the agents) can go unseen.
+GAME_LOOKUP_TTL = 300.0
 _ALIAS_CACHE: dict[tuple[str, str], tuple[float, dict[tuple[str, str], str], dict[str, str]]] = {}
 _TEAMS_CACHE: dict[tuple[str, str], tuple[float, list[Any], int]] = {}
 
@@ -777,6 +782,35 @@ def find_existing_game(
     return row["game_id"] if row else None
 
 
+def game_unchanged(stored: Any, incoming: dict[str, Any]) -> bool:
+    """Would writing `incoming` change nothing about the `stored` row?
+
+    Mirrors `upsert_game`'s merge rule: a None in the incoming row never
+    overwrites (COALESCE), so it is not a change. Anything else that differs
+    -- a final score, `completed` flipping, a moved start, a new line -- is.
+    No stored row means it is new.
+    """
+    if stored is None:
+        return False
+    keys = set(stored.keys())
+    for col in GAME_COLS:
+        if col in ("game_id", "source") or col not in keys:
+            continue
+        new = incoming.get(col)
+        if new is None:
+            continue
+        old = stored[col]
+        if isinstance(new, float) or isinstance(old, float):
+            try:
+                if abs(float(new) - float(old)) > 1e-9:
+                    return False
+            except (TypeError, ValueError):
+                return False
+        elif str(new) != str(old):
+            return False
+    return True
+
+
 def upsert_game(conn: sqlite3.Connection, g: dict[str, Any]) -> None:
     """Insert or update one game, then refresh its two team_game_stats rows.
 
@@ -785,6 +819,7 @@ def upsert_game(conn: sqlite3.Connection, g: dict[str, Any]) -> None:
     """
     # Any game write can change what a Kalshi-market lookup should find.
     GAME_LOOKUP_CACHE.clear()
+    GAME_INDEX.clear()
     g = dict(g)
     # Derive the Central slate date when the caller has not stated one, so
     # every row carries the date a person would file the game under and the

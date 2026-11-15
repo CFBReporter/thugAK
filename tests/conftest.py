@@ -60,11 +60,12 @@ def _postgres_schema(request, monkeypatch):
     monkeypatch.setattr(store, "uses_postgres", lambda path=None: True)
 
     real_connect = db.connect_postgres
-    shared = real_connect()
+    shared = real_connect(pooled=False)  # a pool per throwaway schema would leak connections
 
     class _Shared(db.PgConnection):
         def __init__(self, inner):
             self._conn = inner._conn
+            self._pool = None
 
         def close(self):  # kept open for the rest of the test
             pass
@@ -81,7 +82,7 @@ def _postgres_schema(request, monkeypatch):
         shared.close()
         # Drop from a connection outside the test schema.
         os.environ.pop(db.SCHEMA_ENV_VAR, None)
-        c = real_connect()
+        c = real_connect(pooled=False)
         try:
             c.raw.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
             c.raw.commit()

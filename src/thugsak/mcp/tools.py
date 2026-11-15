@@ -157,6 +157,17 @@ async def _league_markets(
                     {"series": series, "error": f"{type(e).__name__}: {e}"}
                 )
 
+    # Load the games these events can refer to in one query, so matching does
+    # not look each one up separately (~200 round trips on a college
+    # Saturday against a hosted database). Kalshi lists about two weeks ahead;
+    # the window allows for that plus the matcher's date tolerance.
+    today = today_local()
+    matching.preload_games(
+        conn, league_key,
+        (today - timedelta(days=4)).strftime("%Y-%m-%d"),
+        (today + timedelta(days=21)).strftime("%Y-%m-%d"),
+    )
+
     # Resolve each event key once, using the winner markets (which name a team
     # outright) before falling back to spread markets.
     grouped = matching.group_by_event(all_markets)
@@ -224,14 +235,72 @@ def _event_key_date(event_key: str) -> str | None:
     return p.date if p else None
 
 
+def store_scoreboard(conn, league: str, date: str, live: Sequence[Any]) -> dict[str, int]:
+    """Write an ESPN scoreboard into `games` -- only what is new or changed.
+
+    The model learns from completed games and the page lists upcoming ones;
+    both need a stored row (predictions, Kalshi matching and the record all
+    key on it). But an unchanged game needs no write: a scheduled fixture
+    that has not moved and a final already stored as final are skipped. On a
+    remote database every write is a round trip, and re-saving all 118 games
+    of an NCAAF Saturday on every refresh was ~600 of them.
+    """
+    out = {"written": 0, "unchanged": 0, "skipped": 0}
+    # One read for the whole date, compared in memory below.
+    existing = {r["game_id"]: r for r in store.games_on_date(conn, league, date)}
+    for g in live:
+        home = matching.resolve_or_register(conn, league, g.home)
+        away = matching.resolve_or_register(conn, league, g.away)
+        if not home or not away or home == away:
+            out["skipped"] += 1
+            continue
+        line = g.best_line
+        row = {
+            "game_id": f"{league}:espn:{g.espn_id}",
+            "league": league,
+            "season": g.season or get_league(league).fpi_season,
+            "season_type": "regular",
+            "start_time": g.start_time,
+            "home_team": home,
+            "away_team": away,
+            "home_score": g.home_score,
+            "away_score": g.away_score,
+            "completed": 1 if g.completed else 0,
+            "neutral_site": 1 if g.neutral_site else 0,
+            "close_spread": line.spread if line else None,
+            "close_total": line.total if line else None,
+            "close_home_ml": line.home_ml if line else None,
+            "close_away_ml": line.away_ml if line else None,
+            "source": "espn",
+            # ESPN was asked for this date, so this is the slate the game
+            # belongs to regardless of its UTC start.
+            "slate_date": date,
+        }
+        if store.game_unchanged(existing.get(row["game_id"]), row):
+            out["unchanged"] += 1
+            continue
+        store.upsert_game(conn, row)
+        out["written"] += 1
+    return out
+
+
 async def list_games(
-    league: str, date: str | None = None, *, db: str = str(DB_PATH)
+    league: str,
+    date: str | None = None,
+    *,
+    refresh: bool = False,
+    db: str = str(DB_PATH),
 ) -> dict[str, Any]:
     """Games for a league on a Central-Time date (YYYY-MM-DD, default today).
 
     Past dates are allowed and are how the lookback works: completed games
     come back with their final score, and a prediction for them is still
     computed as of kickoff minus an hour.
+
+    Read-only by default: a page load shows what the hourly agents stored and
+    writes nothing. `refresh=True` (the ingest agent) first pulls the ESPN
+    scoreboard for the date, stores what is new or changed, and settles any
+    predictions whose games have finished.
     """
     get_league(league)
     # Central, not UTC. After 6pm CST the UTC date has already rolled over, so
@@ -239,59 +308,23 @@ async def list_games(
     # at tonight's games.
     date = date or today_local().strftime("%Y-%m-%d")
     store.init_db(db)
+    note = ""
 
     async with cache.make_client() as client:
         with store.connect(db) as conn:
-            # Refresh the slate from ESPN so the requested date exists locally.
-            async with _provider().session(client) as ec:
-                try:
-                    live = await ec.scoreboard(league, date=date)
-                except Exception as e:
-                    live = []
-                    note = f"ESPN scoreboard unavailable: {type(e).__name__}"
-                else:
-                    note = ""
-            for g in live:
-                home = matching.resolve_or_register(conn, league, g.home)
-                away = matching.resolve_or_register(conn, league, g.away)
-                if not home or not away or home == away:
-                    continue
-                line = g.best_line
-                store.upsert_game(
-                    conn,
-                    {
-                        "game_id": f"{league}:espn:{g.espn_id}",
-                        "league": league,
-                        "season": g.season or get_league(league).fpi_season,
-                        "season_type": "regular",
-                        "start_time": g.start_time,
-                        "home_team": home,
-                        "away_team": away,
-                        "home_score": g.home_score,
-                        "away_score": g.away_score,
-                        "completed": 1 if g.completed else 0,
-                        "neutral_site": 1 if g.neutral_site else 0,
-                        "close_spread": line.spread if line else None,
-                        "close_total": line.total if line else None,
-                        "close_home_ml": line.home_ml if line else None,
-                        "close_away_ml": line.away_ml if line else None,
-                        "source": "espn",
-                        # ESPN was asked for this date, so this is the slate
-                        # the game belongs to regardless of its UTC start.
-                        "slate_date": date,
-                    },
-                )
-            conn.commit()
-
-            # Fill in results for anything predicted earlier that has since
-            # finished, so the record accrues as a side effect of browsing
-            # rather than needing a job nobody remembers to run.
-            store.settle_predictions(conn, league)
-            # Commit before market matching: that step is slow and network
-            # bound, and an open write here held the SQLite lock across it --
-            # every other writer (the agent cycle, the next click) waited out
-            # the 60s busy timeout and failed with "database is locked".
-            conn.commit()
+            if refresh:
+                async with _provider().session(client) as ec:
+                    try:
+                        live = await ec.scoreboard(league, date=date)
+                    except Exception as e:
+                        live = []
+                        note = f"ESPN scoreboard unavailable: {type(e).__name__}"
+                store_scoreboard(conn, league, date, live)
+                store.settle_predictions(conn, league)
+                # Commit before market matching: that step is slow and
+                # network bound, and an open write held across it blocked
+                # every other writer until the 60s busy timeout.
+                conn.commit()
             rows = store.games_on_date(conn, league, date)
             by_game, unmatched = await _league_markets(conn, client, league)
             # Kalshi lists two weeks of events at once, so restrict the
@@ -362,9 +395,13 @@ async def get_prediction(
     game_id: str,
     *,
     include_injuries: bool = True,
+    record: bool = True,
     db: str = str(DB_PATH),
 ) -> dict[str, Any]:
     """Predicted total, spread and win probability, with every input shown.
+
+    `record=False` (the web pages) computes without saving to the prediction
+    record; the agents record, so the record still accrues every hour.
 
     Computed as of kickoff minus one hour using only earlier games, so the
     same code path serves tonight's slate and a lookback on a past game.
@@ -408,12 +445,13 @@ async def get_prediction(
                 market_total=line["total"],
                 market_home_prob=mkt_prob,
             )
-            predict_mod.save(
-                conn, pred,
-                matchup=_matchup(conn, game),
-                slate_date=game["slate_date"],
-            )
-            conn.commit()
+            if record:
+                predict_mod.save(
+                    conn, pred,
+                    matchup=_matchup(conn, game),
+                    slate_date=game["slate_date"],
+                )
+                conn.commit()
 
             result = {
                 "game_id": game_id,
@@ -1043,6 +1081,7 @@ async def get_recommendation(
     game_id: str,
     *,
     contracts: int = 100,
+    record: bool = True,
     db: str = str(DB_PATH),
 ) -> dict[str, Any]:
     """The answer: a predicted score, and five bets with a yes or no on each.
@@ -1119,11 +1158,12 @@ async def get_recommendation(
                     "error": "no usable prediction",
                     "warnings": pred.warnings,
                 }
-            predict_mod.save(
-                conn, pred,
-                matchup=_matchup(conn, game),
-                slate_date=game["slate_date"],
-            )
+            if record:
+                predict_mod.save(
+                    conn, pred,
+                    matchup=_matchup(conn, game),
+                    slate_date=game["slate_date"],
+                )
 
             by_game, _ = await _league_markets(conn, client, league)
             markets = by_game.get(game_id, [])
@@ -1205,26 +1245,27 @@ async def get_recommendation(
             # Keep the bets with the prediction. They cannot be rebuilt from
             # anything we control: they depend on the Kalshi asks and the
             # money that stood at the cutoff.
-            store.record_bets(
-                conn, game_id, as_of,
-                bets=[
-                    {
-                        "slot": b.slot, "recommendation": b.recommendation,
-                        "bet": b.bet, "ticker": b.ticker, "price": b.price,
-                        "all_in_cost": b.all_in_cost, "edge": b.edge,
-                        "required_edge": b.required_edge,
-                        "dollars_traded": round(b.dollars_traded, 2),
-                        "kind": b.kind, "side": b.side,
-                        "threshold": b.threshold,
-                        "subject_team": b.subject_team,
-                    }
-                    for b in bets
-                ],
-                the_call=verdict_mod.the_call(bets),
-                money_usd=round(gm.total_traded, 2),
-                model_version=predict_mod.MODEL_VERSION,
-            )
-            store.settle_predictions(conn, league)
+            if record:
+                store.record_bets(
+                    conn, game_id, as_of,
+                    bets=[
+                        {
+                            "slot": b.slot, "recommendation": b.recommendation,
+                            "bet": b.bet, "ticker": b.ticker, "price": b.price,
+                            "all_in_cost": b.all_in_cost, "edge": b.edge,
+                            "required_edge": b.required_edge,
+                            "dollars_traded": round(b.dollars_traded, 2),
+                            "kind": b.kind, "side": b.side,
+                            "threshold": b.threshold,
+                            "subject_team": b.subject_team,
+                        }
+                        for b in bets
+                    ],
+                    the_call=verdict_mod.the_call(bets),
+                    money_usd=round(gm.total_traded, 2),
+                    model_version=predict_mod.MODEL_VERSION,
+                )
+                store.settle_predictions(conn, league)
 
             actual = None
             if finished:

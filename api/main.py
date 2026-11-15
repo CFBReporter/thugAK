@@ -183,7 +183,10 @@ async def recommendation(
     contracts: int = Query(100, ge=1, le=10_000),
 ) -> Any:
     """The answer: predicted score, one definitive call, and the five bets."""
-    return await _call(tools.get_recommendation, league, game_id, contracts=contracts)
+    # Pages compute; they do not write. The agents keep the prediction record.
+    return await _call(
+        tools.get_recommendation, league, game_id, contracts=contracts, record=False
+    )
 
 
 @app.get("/api/edges")
@@ -211,7 +214,8 @@ async def prediction(
 ) -> Any:
     """Every model input behind the prediction, for the 'show your work' panel."""
     return await _call(
-        tools.get_prediction, league, game_id, include_injuries=include_injuries
+        tools.get_prediction, league, game_id,
+        include_injuries=include_injuries, record=False,
     )
 
 

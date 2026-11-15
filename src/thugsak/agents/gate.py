@@ -146,26 +146,13 @@ async def refresh_scores(league: str, date: str, *, db: str = str(DB_PATH)) -> d
                     except Exception:
                         out[iso] = -1
                         continue
-                    n = 0
-                    for g in live:
-                        home = matching.resolve_or_register(conn, league, g.home)
-                        away = matching.resolve_or_register(conn, league, g.away)
-                        if not home or not away or home == away:
-                            continue
-                        store.upsert_game(conn, {
-                            "game_id": f"{league}:espn:{g.espn_id}",
-                            "league": league,
-                            "season": g.season or get_league(league).fpi_season,
-                            "season_type": "regular",
-                            "start_time": g.start_time,
-                            "home_team": home, "away_team": away,
-                            "home_score": g.home_score, "away_score": g.away_score,
-                            "completed": 1 if g.completed else 0,
-                            "neutral_site": 1 if g.neutral_site else 0,
-                            "source": "espn", "slate_date": iso,
-                        })
-                        n += 1
-                    out[iso] = n
+                    # Same writer as the ingest path: only new or changed
+                    # games are written, so a quiet hour costs no writes.
+                    res = t.store_scoreboard(conn, league, iso, live)
+                    # Pages no longer settle predictions; this hourly pass does.
+                    store.settle_predictions(conn, league)
+                    out[iso] = res["written"]
+                    out[f"{iso}_unchanged"] = res["unchanged"]
                     conn.commit()   # before the next date's network call
     return out
 

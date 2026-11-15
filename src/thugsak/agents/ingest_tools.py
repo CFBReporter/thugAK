@@ -97,7 +97,7 @@ async def ingest_slate(
     from ..mcp import tools as t  # noqa: PLC0415
 
     date = date or _today()
-    out = await t.list_games(league, date, db=db)
+    out = await t.list_games(league, date, refresh=True, db=db)
     games = out.get("games", [])
     with store.connect(db, readonly=True) as conn:
         scope = slate_scope(conn, league, date)

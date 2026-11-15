@@ -219,8 +219,9 @@ class PgCursor:
 class PgConnection:
     """Wraps a psycopg connection with the sqlite3 surface the store uses."""
 
-    def __init__(self, conn: Any):
+    def __init__(self, conn: Any, pool: Any = None):
         self._conn = conn
+        self._pool = pool
 
     def execute(self, sql: str, params: Iterable[Any] | None = None) -> PgCursor:
         cur = self._conn.cursor()
@@ -250,7 +251,12 @@ class PgConnection:
         self._conn.rollback()
 
     def close(self) -> None:
-        self._conn.close()
+        if self._pool is not None:
+            # Back to the pool for the next request. The pool rolls back any
+            # transaction still open, so nothing leaks between requests.
+            self._pool.putconn(self._conn)
+        else:
+            self._conn.close()
 
     @property
     def raw(self) -> Any:
@@ -313,8 +319,89 @@ def apply_migrations(conn: PgConnection, directory=None) -> list[str]:
     return applied
 
 
-def connect_postgres(url: str | None = None, *, connect_timeout: int = 15) -> PgConnection:
+# --------------------------------------------------------------------------
+# connection pool
+# --------------------------------------------------------------------------
+#
+# Opening a connection to the hosted pooler costs ~0.5-0.9s (TLS + auth over
+# the network), and one page load opens several. The pool keeps a few open
+# per database+schema and hands them out; each is health-checked on checkout
+# because a pooler can drop idle connections.
+
+POOL_MAX = int(os.environ.get("THUGSAK_PG_POOL_MAX", "5"))
+
+import atexit as _atexit
+
+_atexit.register(lambda: close_pools())
+_POOLS: dict[str, Any] = {}
+
+
+def _pool_for(target: str, schema: str) -> Any:
+    from psycopg_pool import ConnectionPool
+
+    key = f"{target}#{schema}"
+    pool = _POOLS.get(key)
+    if pool is not None:
+        return pool
+
+    def configure(conn: Any) -> None:
+        if schema:
+            from psycopg import sql as pgsql
+
+            conn.execute(pgsql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(pgsql.Identifier(schema)))
+            conn.execute(pgsql.SQL("SET search_path TO {}").format(pgsql.Identifier(schema)))
+            conn.commit()
+
+    pool = ConnectionPool(
+        target,
+        min_size=1,
+        max_size=POOL_MAX,
+        kwargs={"prepare_threshold": None, "connect_timeout": 15},
+        configure=configure,
+        check=ConnectionPool.check_connection,
+        max_idle=300,
+        timeout=30,
+        name="thugsak",
+        open=True,
+    )
+    _POOLS[key] = pool
+    return pool
+
+
+def close_pools() -> None:
+    for p in list(_POOLS.values()):
+        try:
+            p.close()
+        except Exception:
+            pass
+    _POOLS.clear()
+
+
+def connect_postgres(
+    url: str | None = None, *, connect_timeout: int = 15, pooled: bool | None = None
+) -> PgConnection:
+    """A connection to the configured database.
+
+    Pooled by default when connecting to the configured URL; an explicit `url`
+    (a one-off, such as a credentials check) gets a dedicated connection.
+    """
     import psycopg  # imported here so SQLite-only installs need no driver
+
+    if pooled is None:
+        pooled = url is None
+    if pooled:
+        target = database_url()
+        if not target:
+            raise RuntimeError(f"{ENV_VAR} is not set")
+        schema = os.environ.get(SCHEMA_ENV_VAR, "").strip()
+        try:
+            pool = _pool_for(target, schema)
+            return PgConnection(pool.getconn(), pool)
+        except Exception as exc:
+            raise RuntimeError(
+                f"could not get a connection to {redacted(target)}: "
+                f"{type(exc).__name__}: {str(exc).replace(target, redacted(target))}"
+            ) from None
 
     target = url or database_url()
     if not target:

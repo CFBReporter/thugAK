@@ -991,13 +991,72 @@ def _find_game(
     """
     import time as _time
 
-    key = (store.db_ident(conn), league, date, frozenset(teams), tolerance_days)
+    ident = store.db_ident(conn)
+    key = (ident, league, date, frozenset(teams), tolerance_days)
     hit = store.GAME_LOOKUP_CACHE.get(key)
     if hit is not None and _time.monotonic() - hit[0] < store.GAME_LOOKUP_TTL:
         return hit[1]
-    row = _find_game_query(conn, league, date, teams, tolerance_days)
+    row = _find_game_in_index(ident, league, date, teams, tolerance_days)
+    if row is _NOT_COVERED:
+        row = _find_game_query(conn, league, date, teams, tolerance_days)
     store.GAME_LOOKUP_CACHE[key] = (_time.monotonic(), row)
     return row
+
+
+_NOT_COVERED = object()
+
+
+def preload_games(conn: Any, league: str, lo: str, hi: str) -> int:
+    """Load every game of a league whose date falls in [lo, hi] -- one query.
+
+    Kalshi lists about two weeks of events per series, and matching asks for
+    each event's game in turn: ~200 separate lookups on a college Saturday,
+    each a network round trip on a hosted database. With the window loaded,
+    `_find_game` answers from memory. Dropped by `store.upsert_game`.
+    """
+    import time as _time
+
+    rows = conn.execute(
+        """SELECT * FROM games WHERE league=?
+             AND COALESCE(slate_date, substr(start_time,1,10)) BETWEEN ? AND ?""",
+        (league, lo, hi),
+    ).fetchall()
+    by_pair: dict[frozenset[str], list[Any]] = {}
+    for r in rows:
+        by_pair.setdefault(frozenset((r["home_team"], r["away_team"])), []).append(r)
+    store.GAME_INDEX[(store.db_ident(conn), league)] = (_time.monotonic(), lo, hi, by_pair)
+    return len(rows)
+
+
+def _find_game_in_index(
+    ident: str, league: str, date: str, teams: tuple[str, str], tolerance_days: int
+) -> Any:
+    """Answer from a preloaded window, or `_NOT_COVERED` if the window does
+    not span this lookup (then the caller queries). Same rule as the SQL:
+    date within tolerance, nearest first."""
+    import time as _time
+
+    idx = store.GAME_INDEX.get((ident, league))
+    if idx is None or _time.monotonic() - idx[0] >= store.GAME_LOOKUP_TTL:
+        return _NOT_COVERED
+    _ts, lo, hi, by_pair = idx
+    try:
+        d0 = datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        return None
+    wlo = (d0 - timedelta(days=tolerance_days)).strftime("%Y-%m-%d")
+    whi = (d0 + timedelta(days=tolerance_days)).strftime("%Y-%m-%d")
+    if wlo < lo or whi > hi:
+        return _NOT_COVERED
+    best, best_gap = None, None
+    for r in by_pair.get(frozenset(teams), []):
+        d = r["slate_date"] or str(r["start_time"])[:10]
+        if not (wlo <= d <= whi):
+            continue
+        gap = abs((datetime.strptime(d, "%Y-%m-%d") - d0).days)
+        if best is None or gap < best_gap:
+            best, best_gap = r, gap
+    return best
 
 
 def _find_game_query(
