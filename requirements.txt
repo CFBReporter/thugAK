@@ -13,3 +13,9 @@ httpx==0.28.1
 # this app is a Central-Time date, so the tz data is load-bearing rather than
 # optional. 2026.6 was published 2026-10-28, clear of the 7-day cutoff.
 tzdata==2026.6
+# Postgres (Supabase) driver and pool, used when THUGSAK_DATABASE_URL is set.
+# psycopg 3.3.9 (2026-11-12) is inside the 7-day window; 3.3.8 is from
+# 2026-11-04. psycopg-pool 3.3.3 is from 2026-09-22.
+psycopg==3.3.8
+psycopg-binary==3.3.8
+psycopg-pool==3.3.3
