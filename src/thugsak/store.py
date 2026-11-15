@@ -716,6 +716,61 @@ def team_label(conn: sqlite3.Connection, team_id: str, *, short: bool = False) -
     return row["display_name"] or row["canonical"] or team_id.split(":")[-1]
 
 
+def espn_id_for(conn: Any, team_id: str) -> str:
+    """A team's ESPN id, from the cached league table ('' when unknown)."""
+    league = team_id.split(":", 1)[0]
+    row = next((r for r in all_teams(conn, league) if r["team_id"] == team_id), None)
+    return str(row["espn_id"]) if row is not None and row["espn_id"] else ""
+
+
+# --------------------------------------------------------------------------
+# read caches for remote databases
+# --------------------------------------------------------------------------
+#
+# On Postgres every query is a network round trip (~84 ms from a home PC to
+# us-east-1), and one game view asked for the same team history 13 times and
+# the calibration 5 times. These caches hold those reads for READ_CACHE_TTL.
+# They are Postgres-only -- SQLite reads are local and sub-millisecond, so
+# caching there would add risk for no gain -- and `db.on_write` clears them
+# whenever any statement in this process writes the tables they mirror.
+
+READ_CACHE_TTL = 300.0
+_HISTORY_CACHE: dict[tuple[Any, ...], tuple[float, list[Any]]] = {}
+_CALIBRATION_CACHE: dict[tuple[str, str], tuple[float, dict[str, float]]] = {}
+
+
+def invalidate_read_caches() -> None:
+    _HISTORY_CACHE.clear()
+    _CALIBRATION_CACHE.clear()
+
+
+def _on_db_write(sql: str) -> None:
+    s = sql.lower()
+    if "team_game_stats" in s or "games" in s:
+        _HISTORY_CACHE.clear()
+        GAME_LOOKUP_CACHE.clear()
+        GAME_INDEX.clear()
+    if "calibration" in s:
+        _CALIBRATION_CACHE.clear()
+    # The alias/teams caches are kept in step explicitly by add_alias,
+    # upsert_team and invalidate_name_caches; clearing them on every alias
+    # insert would reload the table once per newly registered name.
+
+
+db.on_write(_on_db_write)
+
+
+def _cached(cache: dict, key: tuple, load):
+    import time as _time
+
+    hit = cache.get(key)
+    if hit and _time.monotonic() - hit[0] < READ_CACHE_TTL:
+        return hit[1]
+    value = load()
+    cache[key] = (_time.monotonic(), value)
+    return value
+
+
 def team_labels(conn: sqlite3.Connection, league: str) -> dict[str, str]:
     """All of a league's id -> display-name mappings, for bulk rendering."""
     return {
@@ -1001,7 +1056,14 @@ def team_games_before(
     if limit:
         q.append("LIMIT ?")
         args.append(limit)
-    return list(conn.execute(" ".join(q), args))
+    sql = " ".join(q)
+    if not is_postgres(conn):
+        return list(conn.execute(sql, args))
+    rows = _cached(
+        _HISTORY_CACHE, (db_ident(conn), sql, tuple(args)),
+        lambda: list(conn.execute(sql, args)),
+    )
+    return list(rows)
 
 
 def get_game(conn: sqlite3.Connection, game_id: str) -> sqlite3.Row | None:
@@ -1121,12 +1183,17 @@ def put_calibration(
 
 
 def get_calibration(conn: sqlite3.Connection, league: str) -> dict[str, float]:
-    return {
-        r["key"]: r["value"]
-        for r in conn.execute(
-            "SELECT key, value FROM calibration WHERE league=?", (league,)
-        )
-    }
+    def load() -> dict[str, float]:
+        return {
+            r["key"]: r["value"]
+            for r in conn.execute(
+                "SELECT key, value FROM calibration WHERE league=?", (league,)
+            )
+        }
+
+    if not is_postgres(conn):
+        return load()
+    return dict(_cached(_CALIBRATION_CACHE, (db_ident(conn), league), load))
 
 
 def calibration_meta(conn: sqlite3.Connection, league: str) -> dict[str, Any]:

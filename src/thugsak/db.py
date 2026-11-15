@@ -23,7 +23,8 @@ per-machine, and large.
 from __future__ import annotations
 
 import os
-from typing import Any, Iterable, Iterator, Sequence
+import re
+from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from .config import PROJECT_ROOT
 
@@ -216,14 +217,48 @@ class PgCursor:
         return self._cur.description
 
 
+# --------------------------------------------------------------------------
+# write notifications
+# --------------------------------------------------------------------------
+#
+# The store keeps short-lived in-process caches of remote reads (a team's
+# game history, calibration). Every write statement on a Postgres connection
+# is reported here -- and again on commit -- so those caches drop the tables
+# it touched. Hooked at the adapter, not in each store function, so raw SQL
+# written anywhere (tests, scripts, the ingest tools) cannot leave a stale
+# read behind in this process. Writes from other processes are bounded by the
+# caches' TTL instead.
+
+_WRITE_RE = re.compile(r"^\s*(INSERT|UPDATE|DELETE|TRUNCATE|ALTER|DROP|CREATE|COPY)\b", re.I)
+_WRITE_LISTENERS: list[Callable[[str], None]] = []
+
+
+def on_write(fn: Callable[[str], None]) -> None:
+    """Register `fn(sql)` to run after any write statement or commit."""
+    if fn not in _WRITE_LISTENERS:
+        _WRITE_LISTENERS.append(fn)
+
+
+def _notify(sql: str) -> None:
+    for fn in _WRITE_LISTENERS:
+        fn(sql)
+
+
 class PgConnection:
     """Wraps a psycopg connection with the sqlite3 surface the store uses."""
 
     def __init__(self, conn: Any, pool: Any = None):
         self._conn = conn
         self._pool = pool
+        self._writes: list[str] = []
+
+    def _wrote(self, sql: str) -> None:
+        if _WRITE_RE.match(sql):
+            self.__dict__.setdefault("_writes", []).append(sql)
+            _notify(sql)
 
     def execute(self, sql: str, params: Iterable[Any] | None = None) -> PgCursor:
+        self._wrote(sql)
         cur = self._conn.cursor()
         params = tuple(params) if params is not None else ()
         if params:
@@ -235,6 +270,7 @@ class PgConnection:
         return PgCursor(cur)
 
     def executemany(self, sql: str, seq: Iterable[Iterable[Any]]) -> PgCursor:
+        self._wrote(sql)
         cur = self._conn.cursor()
         cur.executemany(translate_placeholders(sql), [tuple(p) for p in seq])
         return PgCursor(cur)
@@ -242,10 +278,17 @@ class PgConnection:
     def executescript(self, script: str) -> None:
         # psycopg runs a multi-statement string in one call when it carries
         # no parameters, which a schema script never does.
+        self.__dict__.setdefault("_writes", []).append(script)
+        _notify(script)
         self._conn.execute(script)
 
     def commit(self) -> None:
         self._conn.commit()
+        # Again after commit: a read in another connection between the write
+        # and the commit could have re-cached the old rows.
+        writes, self._writes = self.__dict__.get("_writes", []), []
+        for sql in writes:
+            _notify(sql)
 
     def rollback(self) -> None:
         self._conn.rollback()

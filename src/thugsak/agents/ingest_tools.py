@@ -39,10 +39,8 @@ def _session(client: Any) -> Any:
 
 
 def _espn_team_id(conn, team_id: str) -> str:
-    row = conn.execute(
-        "SELECT espn_id FROM teams WHERE team_id=?", (team_id,)
-    ).fetchone()
-    return str(row["espn_id"]) if row and row["espn_id"] else ""
+    # From the cached teams table: a game view asked for this 11 times.
+    return store.espn_id_for(conn, team_id)
 
 
 def _today() -> str:

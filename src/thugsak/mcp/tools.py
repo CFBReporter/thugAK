@@ -428,7 +428,7 @@ async def get_prediction(
                 except Exception as e:
                     injury_note = f"injury analysis unavailable: {type(e).__name__}"
 
-            line = await _market_line(conn, client, league, game)
+            line = await _market_line(conn, client, league, game, persist=record)
             mkt_prob = None
             if line["home_ml"] is not None and line["away_ml"] is not None:
                 fair = devig.fair_two_way(line["home_ml"], line["away_ml"])
@@ -586,10 +586,8 @@ async def _injury_impacts(
 
 
 def _espn_team_id(conn, league: str, team_id: str) -> str:
-    row = conn.execute(
-        "SELECT espn_id FROM teams WHERE team_id=?", (team_id,)
-    ).fetchone()
-    return str(row["espn_id"]) if row and row["espn_id"] else ""
+    # From the cached teams table: a game view asked for this 11 times.
+    return store.espn_id_for(conn, team_id)
 
 
 
@@ -889,7 +887,7 @@ async def get_edges(
 
 
 async def _market_line(
-    conn, client, league: str, game: Any
+    conn, client, league: str, game: Any, *, persist: bool = True
 ) -> dict[str, Any]:
     """The sportsbook line, falling back to the per-game endpoint.
 
@@ -942,7 +940,10 @@ async def _market_line(
         out["away_ml"] = best.away_ml
     out["source"] = f"{best.provider} (per-game pickcenter)"
 
-    # Persist so a later lookback sees the line that was available now.
+    # Persist so a later lookback sees the line that was available now --
+    # from the agents only; a page view (persist=False) writes nothing.
+    if not persist:
+        return out
     store.update_market_line(
         conn,
         game["game_id"],
@@ -1139,7 +1140,7 @@ async def get_recommendation(
                 )
             )
 
-            line = await _market_line(conn, client, league, game)
+            line = await _market_line(conn, client, league, game, persist=record)
             mkt_prob = None
             if line["home_ml"] is not None and line["away_ml"] is not None:
                 fair = devig.fair_two_way(line["home_ml"], line["away_ml"])
