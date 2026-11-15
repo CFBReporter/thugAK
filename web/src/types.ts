@@ -41,7 +41,28 @@ export interface GamesResponse {
   games: GameRow[]
   unmatched_kalshi_events: unknown[]
   unmatched_count: number
+  /** Where the price fields came from: live Kalshi, the agents' last saved
+   * copy, or nothing yet. */
+  prices_source: 'live' | 'snapshot' | 'none'
+  /** UTC ISO time the prices were taken, when known. */
+  prices_as_of: string | null
   note: string
+}
+
+/** The Kalshi fields of a slate row, as /api/prices returns them per game. */
+export type PriceFields = Pick<
+  GameRow,
+  'kalshi_markets' | 'kalshi_winner_prices' | 'home_win_price' | 'away_win_price' | 'has_ladders'
+>
+
+export interface PricesResponse {
+  league: string
+  date: string
+  as_of: string
+  source: 'live'
+  prices: Record<string, PriceFields>
+  unmatched_kalshi_events: unknown[]
+  unmatched_count: number
 }
 
 export interface Bet {

@@ -53,7 +53,11 @@ async def fetch_market_state(league: str, date: str, *, db: str = str(DB_PATH)) 
     async with cache.make_client() as client:
         with store.connect(db) as conn:
             rows = store.games_on_date(conn, league, date)
-            by_game, _ = await t._league_markets(conn, client, league)
+            by_game, unmatched = await t._league_markets(conn, client, league)
+            # Save this hour's prices: a slate page opens on them instantly
+            # and swaps in live ones when Kalshi answers.
+            t.save_price_snapshot(conn, t._build_prices(rows, by_game, unmatched, league, date))
+            conn.commit()
             for r in rows:
                 gid = r["game_id"]
                 markets = by_game.get(gid, [])

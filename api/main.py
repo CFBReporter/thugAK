@@ -23,6 +23,7 @@ Read-only with respect to Kalshi, exactly as v1: no key, no order endpoints.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sqlite3
 import sys
 from pathlib import Path
@@ -34,7 +35,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from fastapi import FastAPI, HTTPException, Query  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
-from thugsak import config, localtime, providers  # noqa: E402
+from thugsak import config, db, localtime, providers  # noqa: E402
 from thugsak.mcp import tools  # noqa: E402
 
 app = FastAPI(
@@ -56,15 +57,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# `list_games` settles predictions, so it writes. One lock across all requests
-# keeps SQLite to a single writer; see the module docstring.
+# One lock across all requests keeps SQLite to a single writer (the hourly
+# agents write the same file); see the module docstring. Postgres handles
+# concurrent readers itself, and pages no longer write, so there the lock is
+# skipped -- otherwise a slow Kalshi price fetch would queue every game view
+# behind it.
 _DB_LOCK = asyncio.Lock()
+
+
+def _db_guard() -> Any:
+    return _DB_LOCK if db.backend() == "sqlite" else contextlib.nullcontext()
 
 
 async def _call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     """Run an engine call, translating its failures into HTTP ones."""
     try:
-        async with _DB_LOCK:
+        async with _db_guard():
             result = await fn(*args, **kwargs)
         # The engine reports a bad reference by returning {"error": ...} with
         # no exception, because its original caller was Claude reading prose.
@@ -172,8 +180,21 @@ async def games(
     league: str = Query(..., description="nfl | nba | ncaaf | ncaamb"),
     date: str | None = Query(None, description="YYYY-MM-DD, Central Time; default today"),
 ) -> Any:
-    """Today's (or a past date's) slate. Past dates drive the lookback."""
-    return await _call(tools.list_games, league, date)
+    """Today's (or a past date's) slate. Past dates drive the lookback.
+
+    Database only: prices are the agents' last saved ones (`prices_as_of`),
+    so the page renders without waiting on Kalshi. `/api/prices` has live.
+    """
+    return await _call(tools.list_games, league, date, prices="snapshot")
+
+
+@app.get("/api/prices")
+async def prices(
+    league: str = Query(...),
+    date: str | None = Query(None),
+) -> Any:
+    """Live Kalshi prices for a slate, keyed by game_id (shared for 60s)."""
+    return await _call(tools.slate_prices, league, date)
 
 
 @app.get("/api/recommendation")

@@ -1,10 +1,27 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { api, useAsync } from './api'
 import { prettyDate, shiftDate } from './format'
 import { GameDetail } from './components/GameDetail'
 import { GameList } from './components/GameList'
 import { Failed, Skeletons } from './components/bits'
-import type { GameRow } from './types'
+import type { GameRow, GamesResponse, PricesResponse } from './types'
+
+/**
+ * Lay live prices over the slate. The slate arrives first, from the database,
+ * carrying the agents' last saved prices; this swaps in live ones per game as
+ * soon as Kalshi answers, so the page is usable before the slow part ends.
+ */
+function withLivePrices(slate: GamesResponse, live: PricesResponse | null): GamesResponse {
+  if (!live || live.league !== slate.league || live.date !== slate.date) return slate
+  return {
+    ...slate,
+    games: slate.games.map((g) => ({ ...g, ...(live.prices[g.game_id] ?? {}) })),
+    unmatched_kalshi_events: live.unmatched_kalshi_events,
+    unmatched_count: live.unmatched_count,
+    prices_source: 'live',
+    prices_as_of: live.as_of,
+  }
+}
 
 const LEAGUES = [
   { key: 'nfl', label: 'NFL' },
@@ -40,6 +57,18 @@ export default function App() {
           // rather than firing a request for the wrong day.
           new Promise<never>(() => {}),
     [league, activeDate],
+  )
+
+  // Fetched alongside the slate, not after it: the two run in parallel and
+  // whichever is slower (almost always Kalshi) no longer holds up the other.
+  const prices = useAsync(
+    (signal) =>
+      activeDate ? api.prices(league, activeDate, signal) : new Promise<never>(() => {}),
+    [league, activeDate],
+  )
+  const slate = useMemo(
+    () => (games.data ? withLivePrices(games.data, prices.data) : null),
+    [games.data, prices.data],
   )
 
   const tz = health.data?.timezone ?? 'CT'
@@ -143,8 +172,13 @@ export default function App() {
           <Skeletons />
         ) : games.error ? (
           <Failed error={games.error} status={games.status} />
-        ) : games.data ? (
-          <GameList data={games.data} onPick={setPicked} />
+        ) : slate ? (
+          <GameList
+            data={slate}
+            pricesLoading={prices.loading}
+            pricesError={prices.error}
+            onPick={setPicked}
+          />
         ) : null}
       </main>
     </div>

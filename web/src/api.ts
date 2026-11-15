@@ -4,6 +4,7 @@ import type {
   GamesResponse,
   HealthResponse,
   LeaguesResponse,
+  PricesResponse,
   RecommendationResponse,
 } from './types'
 
@@ -45,6 +46,9 @@ export const api = {
   leagues: () => get<LeaguesResponse>('leagues', {}),
   games: (league: string, date?: string, signal?: AbortSignal) =>
     get<GamesResponse>('games', { league, date }, signal),
+  /** Live Kalshi prices for the slate; the slate itself renders before these. */
+  prices: (league: string, date?: string, signal?: AbortSignal) =>
+    get<PricesResponse>('prices', { league, date }, signal),
   recommendation: (league: string, gameId: string, signal?: AbortSignal) =>
     get<RecommendationResponse>('recommendation', { league, game_id: gameId }, signal),
   /** Every ladder strike for a game, scored against the model. */

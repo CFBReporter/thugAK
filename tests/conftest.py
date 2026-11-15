@@ -45,6 +45,20 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_process_caches():
+    """Each test starts as a new process would: no cached reads or markets."""
+    from thugsak import store
+    from thugsak.mcp import tools
+
+    store.invalidate_name_caches()
+    store.invalidate_read_caches()
+    store.GAME_LOOKUP_CACHE.clear()
+    store.GAME_INDEX.clear()
+    tools._MARKETS_CACHE.clear()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _postgres_schema(request, monkeypatch):
     if not PG_MODE or "no_pg_harness" in request.keywords:
         yield

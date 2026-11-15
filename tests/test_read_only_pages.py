@@ -169,3 +169,115 @@ def test_list_games_without_refresh_writes_nothing(db, monkeypatch):
     out = asyncio.run(tools.list_games(L, "2026-11-14", db=db))
     assert [g["game_id"] for g in out["games"]] == ["nba:espn:1"]
     assert _snapshot(db) == before
+
+
+# --- prices: snapshot first, live after -------------------------------------------
+
+
+@dataclass
+class _Mkt:
+    ticker: str
+    yes_ask: str | None
+    _subject_team: str | None = None
+    title: str = ""
+    volume: float = 0
+    open_interest: float = 0
+
+
+def _fake_markets(price="0.62"):
+    calls = {"n": 0}
+
+    async def fake(conn, client, league):
+        calls["n"] += 1
+        return {
+            "nba:espn:1": [
+                _Mkt("KXNBAGAME-26NOV14NYKBOS-BOS", price, "nba:BOS"),
+                _Mkt("KXNBAGAME-26NOV14NYKBOS-NYK", "0.40", "nba:NYK"),
+                _Mkt("KXNBASPREAD-26NOV14NYKBOS-BOS3", "0.50"),
+            ]
+        }, []
+
+    return fake, calls
+
+
+def _seed(db):
+    with store.connect(db) as conn:
+        tools.store_scoreboard(conn, L, "2026-11-14", [_Game()])
+        conn.commit()
+
+
+def test_snapshot_mode_never_calls_kalshi(db, monkeypatch):
+    _seed(db)
+
+    async def boom(*a, **k):
+        raise AssertionError("snapshot mode must not fetch markets")
+
+    monkeypatch.setattr(tools, "_league_markets", boom)
+    out = asyncio.run(tools.list_games(L, "2026-11-14", prices="snapshot", db=db))
+    g = out["games"][0]
+    assert out["prices_source"] == "none" and out["prices_as_of"] is None
+    assert g["kalshi_markets"] == 0 and g["home_win_price"] is None
+
+
+def test_saved_snapshot_is_served_without_kalshi(db, monkeypatch):
+    _seed(db)
+    fake, _ = _fake_markets()
+    with store.connect(db) as conn:
+        rows = store.games_on_date(conn, L, "2026-11-14")
+        by_game, unmatched = asyncio.run(fake(conn, None, L))
+        tools.save_price_snapshot(conn, tools._build_prices(rows, by_game, unmatched, L, "2026-11-14"))
+        conn.commit()
+
+    async def boom(*a, **k):
+        raise AssertionError("snapshot mode must not fetch markets")
+
+    monkeypatch.setattr(tools, "_league_markets", boom)
+    out = asyncio.run(tools.list_games(L, "2026-11-14", prices="snapshot", db=db))
+    g = out["games"][0]
+    assert out["prices_source"] == "snapshot" and out["prices_as_of"]
+    assert g["home_win_price"] == 0.62 and g["away_win_price"] == 0.40
+    assert g["kalshi_markets"] == 3 and g["has_ladders"] is True
+
+
+def test_live_prices_match_the_live_slate_and_are_shared_for_a_minute(db, monkeypatch):
+    _seed(db)
+    fake, calls = _fake_markets()
+    monkeypatch.setattr(tools, "_league_markets", fake)
+    live = asyncio.run(tools.slate_prices(L, "2026-11-14", db=db))
+    full = asyncio.run(tools.list_games(L, "2026-11-14", prices="live", db=db))
+    assert calls["n"] == 1, "second request within the TTL must reuse the fetch"
+    p = live["prices"]["nba:espn:1"]
+    g = full["games"][0]
+    for k in ("kalshi_markets", "home_win_price", "away_win_price", "has_ladders"):
+        assert p[k] == g[k]
+    assert live["source"] == "live" and full["prices_source"] == "live"
+
+
+def test_live_prices_write_nothing(db, monkeypatch):
+    _seed(db)
+    fake, _ = _fake_markets()
+    monkeypatch.setattr(tools, "_league_markets", fake)
+    before = _snapshot(db)
+    asyncio.run(tools.slate_prices(L, "2026-11-14", db=db))
+    assert _snapshot(db) == before
+
+
+def test_old_snapshots_are_pruned(db):
+    with store.connect(db) as conn:
+        for day in ("2026-11-01", "2026-11-14"):
+            tools.save_price_snapshot(conn, {"league": L, "date": day, "prices": {}})
+        conn.commit()
+        assert tools.load_price_snapshot(conn, L, "2026-11-01") is None
+        assert tools.load_price_snapshot(conn, L, "2026-11-14") is not None
+
+
+def test_gate_saves_the_hourly_snapshot(db, monkeypatch):
+    from thugsak.agents import gate
+
+    _seed(db)
+    fake, _ = _fake_markets("0.55")
+    monkeypatch.setattr(tools, "_league_markets", fake)
+    asyncio.run(gate.fetch_market_state(L, "2026-11-14", db=db))
+    with store.connect(db, readonly=True) as conn:
+        snap = tools.load_price_snapshot(conn, L, "2026-11-14")
+    assert snap["prices"]["nba:espn:1"]["home_win_price"] == 0.55

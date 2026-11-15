@@ -73,11 +73,31 @@ function Row({ game, onPick }: { game: GameRow; onPick: (g: GameRow) => void }) 
   )
 }
 
+/** "live", or how old the saved prices are, so stale numbers never pass as live. */
+function pricesNote(data: GamesResponse, loading: boolean, error: string | null): string {
+  if (data.prices_source === 'live') return 'Kalshi prices live'
+  const when = data.prices_as_of
+    ? new Date(data.prices_as_of).toLocaleTimeString('en-US', {
+        hour: 'numeric',
+        minute: '2-digit',
+        timeZone: 'America/Chicago',
+      })
+    : null
+  const saved = when ? `Kalshi prices as of ${when} CT` : 'No saved Kalshi prices yet'
+  if (loading) return `${saved} -- fetching live...`
+  if (error) return `${saved} -- live prices unavailable (${error})`
+  return saved
+}
+
 export function GameList({
   data,
+  pricesLoading = false,
+  pricesError = null,
   onPick,
 }: {
   data: GamesResponse
+  pricesLoading?: boolean
+  pricesError?: string | null
   onPick: (g: GameRow) => void
 }) {
   if (data.games.length === 0) {
@@ -90,18 +110,24 @@ export function GameList({
   }
 
   const withMarkets = data.games.filter((g) => g.kalshi_markets > 0).length
+  // Until some prices exist (saved or live) a zero means "not loaded", not
+  // "no market" -- so the market count and the banner wait for them.
+  const priced = data.prices_source !== 'none'
 
   return (
     <>
       <div className="title-row">
         <h1>{data.games.length} games</h1>
-        <span className="count">
+        <span className="count" hidden={!priced}>
           {withMarkets} with Kalshi markets
           {data.unmatched_count > 0 ? ` -- ${data.unmatched_count} unmatched events` : ''}
         </span>
+        <span className={`count prices-note ${data.prices_source === 'live' ? 'live' : ''}`}>
+          {pricesNote(data, pricesLoading, pricesError)}
+        </span>
       </div>
 
-      {withMarkets < data.games.length ? (
+      {priced && withMarkets < data.games.length ? (
         <div className="banner">
           <span>
             <b>{data.games.length - withMarkets} game(s) have no Kalshi market.</b> That is

@@ -222,6 +222,130 @@ async def _league_markets(
     return by_game, unmatched
 
 
+# Kalshi's open markets for a league, matched to stored games, shared across
+# requests for a minute. Fetching and matching them is most of a slate page's
+# time (three series, paginated; on a college Saturday ~600 markets), and
+# every viewer of the same league would otherwise repeat it.
+MARKETS_CACHE_TTL = 60.0
+_MARKETS_CACHE: dict[tuple[str, str], tuple[float, dict[str, list[Any]], list[dict[str, Any]]]] = {}
+
+
+async def _league_markets_cached(conn, client, league_key: str):
+    import time as _time
+
+    key = (store.db_ident(conn), league_key)
+    hit = _MARKETS_CACHE.get(key)
+    if hit and _time.monotonic() - hit[0] < MARKETS_CACHE_TTL:
+        return hit[1], hit[2]
+    by_game, unmatched = await _league_markets(conn, client, league_key)
+    _MARKETS_CACHE[key] = (_time.monotonic(), by_game, unmatched)
+    return by_game, unmatched
+
+
+PRICE_SNAPSHOT_PREFIX = "slate_prices:"
+PRICE_SNAPSHOT_KEEP_DAYS = 7
+
+
+def _no_prices() -> dict[str, Any]:
+    return {
+        "kalshi_markets": 0,
+        "kalshi_winner_prices": {},
+        "home_win_price": None,
+        "away_win_price": None,
+        "has_ladders": False,
+    }
+
+
+def _price_fields(markets: Sequence[Any], home: str, away: str) -> dict[str, Any]:
+    """The per-game market fields a slate row shows."""
+    winner = [m for m in markets if "GAME" in m.ticker]
+    return {
+        "kalshi_markets": len(markets),
+        "kalshi_winner_prices": {
+            m.ticker: float(m.yes_ask) if m.yes_ask else None for m in winner
+        },
+        # Resolved by subject team rather than left for the caller to infer
+        # from the ticker. Kalshi's code and the stored team id disagree often
+        # enough that suffix-matching a ticker silently picks the wrong side:
+        # Kalshi writes WAS where the store says WSH, so "ends with -WSH"
+        # finds nothing and the home price reads as unavailable.
+        # `_subject_team` is already the canonical id, via the same alias
+        # table everything else uses.
+        "home_win_price": _winner_price(winner, home),
+        "away_win_price": _winner_price(winner, away),
+        "has_ladders": any("SPREAD" in m.ticker or "TOTAL" in m.ticker for m in markets),
+    }
+
+
+def _build_prices(
+    rows: Sequence[Any], by_game: dict[str, list[Any]],
+    unmatched: Sequence[dict[str, Any]], league: str, date: str,
+) -> dict[str, Any]:
+    # Kalshi lists two weeks of events at once, so restrict the unmatched
+    # report to the date in view -- otherwise next week's fixtures read as
+    # failures.
+    unmatched = [
+        u for u in unmatched
+        if not u.get("event_key") or _event_key_date(u["event_key"]) == date
+    ]
+    return {
+        "league": league,
+        "date": date,
+        "as_of": store.utcnow(),
+        "prices": {
+            r["game_id"]: _price_fields(
+                by_game.get(r["game_id"], []), r["home_team"], r["away_team"]
+            )
+            for r in rows
+        },
+        "unmatched_kalshi_events": unmatched[:10],
+        "unmatched_count": len(unmatched),
+    }
+
+
+def save_price_snapshot(conn, payload: dict[str, Any]) -> None:
+    """Keep the agents' latest prices for a slate, so a page opens on them.
+
+    Stored in `meta` under slate_prices:<league>:<date>. Only the last week of
+    dates is kept -- older slates are lookbacks, which show finals, not prices.
+    """
+    league, date = payload["league"], payload["date"]
+    store.put_meta(conn, f"{PRICE_SNAPSHOT_PREFIX}{league}:{date}", payload)
+    cutoff = (
+        datetime.strptime(date, "%Y-%m-%d").date()
+        - timedelta(days=PRICE_SNAPSHOT_KEEP_DAYS)
+    ).strftime("%Y-%m-%d")
+    conn.execute(
+        "DELETE FROM meta WHERE key LIKE ? AND key < ?",
+        (f"{PRICE_SNAPSHOT_PREFIX}{league}:%", f"{PRICE_SNAPSHOT_PREFIX}{league}:{cutoff}"),
+    )
+
+
+def load_price_snapshot(conn, league: str, date: str) -> dict[str, Any] | None:
+    return store.get_meta(conn, f"{PRICE_SNAPSHOT_PREFIX}{league}:{date}")
+
+
+async def slate_prices(
+    league: str, date: str | None = None, *, db: str = str(DB_PATH)
+) -> dict[str, Any]:
+    """Live Kalshi prices for a slate, keyed by game_id. Read-only.
+
+    The web page loads the slate first (from the database, with the agents'
+    last saved prices) and then asks for these, so it shows games at once and
+    fills in live prices when Kalshi answers.
+    """
+    get_league(league)
+    date = date or today_local().strftime("%Y-%m-%d")
+    store.init_db(db)
+    async with cache.make_client() as client:
+        with store.connect(db) as conn:
+            rows = store.games_on_date(conn, league, date)
+            by_game, unmatched = await _league_markets_cached(conn, client, league)
+            out = _build_prices(rows, by_game, unmatched, league, date)
+    out["source"] = "live"
+    return out
+
+
 # --------------------------------------------------------------------------
 # tools
 # --------------------------------------------------------------------------
@@ -289,6 +413,7 @@ async def list_games(
     date: str | None = None,
     *,
     refresh: bool = False,
+    prices: str = "live",
     db: str = str(DB_PATH),
 ) -> dict[str, Any]:
     """Games for a league on a Central-Time date (YYYY-MM-DD, default today).
@@ -301,7 +426,14 @@ async def list_games(
     writes nothing. `refresh=True` (the ingest agent) first pulls the ESPN
     scoreboard for the date, stores what is new or changed, and settles any
     predictions whose games have finished.
+
+    `prices` picks where the Kalshi fields come from: "live" (fetch now,
+    shared for a minute), "snapshot" (the agents' last saved prices -- no
+    Kalshi call, so the page renders at database speed; the browser then asks
+    `slate_prices` for live ones), or "none".
     """
+    if prices not in ("live", "snapshot", "none"):
+        raise ValueError("prices must be live, snapshot or none")
     get_league(league)
     # Central, not UTC. After 6pm CST the UTC date has already rolled over, so
     # a UTC default shows tomorrow's slate while the person is still looking
@@ -326,19 +458,19 @@ async def list_games(
                 # every other writer until the 60s busy timeout.
                 conn.commit()
             rows = store.games_on_date(conn, league, date)
-            by_game, unmatched = await _league_markets(conn, client, league)
-            # Kalshi lists two weeks of events at once, so restrict the
-            # unmatched report to the date in view -- otherwise next week's
-            # fixtures read as failures.
-            unmatched = [
-                u for u in unmatched
-                if not u.get("event_key") or _event_key_date(u["event_key"]) == date
-            ]
+            if prices == "live":
+                by_game, unmatched = await _league_markets_cached(conn, client, league)
+                priced = _build_prices(rows, by_game, unmatched, league, date)
+                priced["source"] = "live"
+            elif prices == "snapshot":
+                priced = load_price_snapshot(conn, league, date) or {}
+                priced["source"] = "snapshot" if priced else "none"
+            else:
+                priced = {"source": "none"}
+            by_id = priced.get("prices") or {}
 
             out = []
             for r in rows:
-                markets = by_game.get(r["game_id"], [])
-                winner = [m for m in markets if "GAME" in m.ticker]
                 out.append(
                     {
                         "game_id": r["game_id"],
@@ -359,24 +491,7 @@ async def list_games(
                             -r["close_spread"] if r["close_spread"] is not None else None
                         ),
                         "book_total": r["close_total"],
-                        "kalshi_markets": len(markets),
-                        "kalshi_winner_prices": {
-                            m.ticker: float(m.yes_ask) if m.yes_ask else None
-                            for m in winner
-                        },
-                        # Resolved by subject team rather than left for the
-                        # caller to infer from the ticker. Kalshi's code and
-                        # the stored team id disagree often enough that
-                        # suffix-matching a ticker silently picks the wrong
-                        # side: Kalshi writes WAS where the store says WSH, so
-                        # "ends with -WSH" finds nothing and the home price
-                        # reads as unavailable. `_subject_team` is already the
-                        # canonical id, via the same alias table everything
-                        # else uses.
-                        "home_win_price": _winner_price(winner, r["home_team"]),
-                        "away_win_price": _winner_price(winner, r["away_team"]),
-                        "has_ladders": any("SPREAD" in m.ticker or "TOTAL" in m.ticker
-                                           for m in markets),
+                        **(by_id.get(r["game_id"]) or _no_prices()),
                     }
                 )
     return {
@@ -384,8 +499,10 @@ async def list_games(
         "date": date,
         "timezone": f"America/Chicago ({tz_abbrev()})",
         "games": out,
-        "unmatched_kalshi_events": unmatched[:10],
-        "unmatched_count": len(unmatched),
+        "unmatched_kalshi_events": priced.get("unmatched_kalshi_events", []),
+        "unmatched_count": priced.get("unmatched_count", 0),
+        "prices_source": priced["source"],
+        "prices_as_of": priced.get("as_of"),
         "note": note or MODEL_NOTE,
     }
 

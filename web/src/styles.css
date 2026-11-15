@@ -123,6 +123,8 @@ a { color: inherit; text-decoration: none; }
 .title-row { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px; }
 h1 { font-size: 22px; font-weight: 800; letter-spacing: -0.02em; }
 .count { color: var(--text-faint); font-size: 13px; font-weight: 500; }
+.prices-note { margin-left: auto; }
+.prices-note.live::before { content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--accent, #22c55e); margin-right: 6px; vertical-align: middle; }
 
 /* ---------- game list ---------- */
 
