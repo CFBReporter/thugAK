@@ -65,7 +65,21 @@ export interface PricesResponse {
   unmatched_count: number
 }
 
+/** A recommended bet that loses if the predicted score holds. */
+export interface Longshot {
+  label: string
+  bet: string
+  kalshi_ticker: string | null
+  price: number | null
+  all_in_cost_after_fees: number | null
+  model_probability: number | null
+  edge_after_fees: number | null
+  why: string
+}
+
 export interface Bet {
+  /** Recommended, but loses if the predicted score holds. */
+  longshot?: boolean
   slot: string
   label: string
   recommendation: Recommendation
@@ -148,6 +162,8 @@ export interface RecommendationResponse {
   prediction_cautions: string[]
 
   the_call: string
+  /** Value bets against the predicted outcome, kept out of the call. */
+  longshots?: Longshot[]
   best_bet: BestBet | null
   headline: string
   bets: Bet[]

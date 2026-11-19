@@ -456,3 +456,13 @@ h1 { font-size: 22px; font-weight: 800; letter-spacing: -0.02em; }
 .explainer h3 { font-size: 14px; color: var(--text); margin-bottom: 4px; }
 .explainer ol, .explainer ul { margin: 4px 0 0 20px; padding: 0; display: grid; gap: 4px; }
 .explainer b { color: var(--text); font-weight: 600; }
+
+/* ---- longshots ---- */
+.longshots { border-style: dashed; }
+.ls-intro { font-size: 13px; color: var(--text-faint); margin-bottom: 10px; }
+.ls-row { padding: 10px 0; border-top: 1px solid var(--line); }
+.ls-row:first-of-type { border-top: 0; }
+.ls-h { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+.ls-bet { font-weight: 600; color: var(--text); }
+.ls-nums { font-family: var(--mono); font-size: 13px; color: var(--text-dim); }
+.ls-why { font-size: 13px; color: var(--text-dim); margin-top: 4px; }

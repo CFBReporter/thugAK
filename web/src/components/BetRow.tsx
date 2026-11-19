@@ -30,6 +30,11 @@ export function BetRow({ bet }: { bet: Bet }) {
         </div>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
           {bet.outcome ? <OutcomeBadge outcome={bet.outcome} /> : null}
+          {bet.longshot ? (
+            <span className="badge small" title="Loses if the predicted score holds">
+              LONGSHOT
+            </span>
+          ) : null}
           <RecBadge rec={bet.recommendation} />
         </div>
       </div>

@@ -122,6 +122,31 @@ export function GameDetail({
             ) : null}
           </Card>
 
+          {/* ---- longshots: value against the prediction, never the call ---- */}
+          {data.longshots && data.longshots.length ? (
+            <Card title="Longshots -- against the prediction" className="longshots">
+              <p className="ls-intro">
+                These lose if the predicted score holds. The model still rates them above their
+                price, so they are shown for information only. Expect each to lose more often
+                than it wins.
+              </p>
+              {data.longshots.map((l) => (
+                <div key={l.kalshi_ticker ?? l.label} className="ls-row">
+                  <div className="ls-h">
+                    <span className="ls-bet">{l.bet}</span>
+                    <span className="ls-nums">
+                      {l.price !== null ? `${Math.round(l.price * 100)}¢` : '--'}
+                      {l.model_probability !== null
+                        ? ` · model ${Math.round(l.model_probability * 100)}%`
+                        : ''}
+                    </span>
+                  </div>
+                  <div className="ls-why">{l.why}</div>
+                </div>
+              ))}
+            </Card>
+          ) : null}
+
           {/* ---- money ---- */}
           <Card title={`Kalshi money -- ${data.kalshi_money.markets_counted} markets`}>
             <MoneyBar

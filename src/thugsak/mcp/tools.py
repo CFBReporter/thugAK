@@ -1379,7 +1379,7 @@ async def get_recommendation(
                         }
                         for b in bets
                     ],
-                    the_call=verdict_mod.the_call(bets),
+                    the_call=verdict_mod.the_call(bets, pred),
                     money_usd=round(gm.total_traded, 2),
                     model_version=pred.model_version,
                 )
@@ -1444,7 +1444,29 @@ async def get_recommendation(
         },
 
         # 2. the call -- the single thing to do, before any table
-        "the_call": verdict_mod.the_call(bets),
+        # The call follows the predicted score: only bets that win if it
+        # holds. Value bets against it are listed under "longshots".
+        "the_call": verdict_mod.the_call(bets, pred),
+        "longshots": [
+            {
+                "label": b.label,
+                "bet": b.bet,
+                "kalshi_ticker": b.ticker,
+                "price": b.price,
+                "all_in_cost_after_fees": b.all_in_cost,
+                "model_probability": b.model_prob,
+                "edge_after_fees": b.edge,
+                "why": (
+                    f"The model predicts {outlook.score_line}, so this loses if "
+                    f"the prediction holds. It gives this bet about "
+                    f"{b.model_prob:.0%}, against a price of {b.price:.0%}: it loses "
+                    f"more often than it wins, but is priced as if it were rarer still."
+                    if b.model_prob is not None and b.price is not None else
+                    f"The model predicts {outlook.score_line}, so this loses if the prediction holds."
+                ),
+            }
+            for b in verdict_mod.split_by_prediction(bets, pred)[1]
+        ],
         "best_bet": (
             {
                 "label": _best.label,
@@ -1457,7 +1479,7 @@ async def get_recommendation(
                 "stake": verdict_mod.STAKE[_best.recommendation],
                 "why": _best.why,
             }
-            if (_best := verdict_mod.best_bet(bets)) else None
+            if (_best := verdict_mod.best_bet(bets, pred)) else None
         ),
 
         # 3. the five bets, ranked with the actionable ones first
@@ -1481,6 +1503,8 @@ async def get_recommendation(
                 "money_note": b.money_note,
                 "money_flow": b.flow_note or None,
                 "cautions": b.cautions,
+                # A recommended bet that loses if the predicted score holds.
+                "longshot": b.actionable and verdict_mod.follows_prediction(b, pred) is False,
                 **(
                     lookback_mod.grade_bet(b, actual) if actual else {}
                 ),

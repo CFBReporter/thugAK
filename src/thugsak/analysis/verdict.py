@@ -614,6 +614,39 @@ STAKE = {
 }
 
 
+def follows_prediction(bet: Bet, pred: Any) -> bool | None:
+    """Would this bet win if the predicted score were the final score?
+
+    Graded with the same rule that settles a bet against the real result
+    (lookback._resolved_yes), so "agrees with the prediction" and "would have
+    won" can never disagree about what a bet means. None when the prediction
+    or the bet's terms are missing.
+    """
+    from .lookback import Actual, _resolved_yes  # noqa: PLC0415
+
+    hp, ap = getattr(pred, "home_points", None), getattr(pred, "away_points", None)
+    if hp is None or ap is None:
+        return None
+    predicted = Actual(
+        home_team=pred.home_team, away_team=pred.away_team,
+        home_label="", away_label="", home_score=hp, away_score=ap,
+    )
+    return _resolved_yes(bet, predicted)
+
+
+def split_by_prediction(bets: Sequence[Bet], pred: Any) -> tuple[list[Bet], list[Bet]]:
+    """(bets that win if the predicted score holds, longshots against it).
+
+    A longshot can still be good value -- the model may give the underdog 28%
+    where the market charges 16% -- but it loses whenever the prediction is
+    right, so it is never the call; the page lists it separately.
+    """
+    agree, longshots = [], []
+    for b in rank_bets(bets):
+        (longshots if follows_prediction(b, pred) is False else agree).append(b)
+    return agree, longshots
+
+
 def rank_bets(bets: Sequence[Bet]) -> list[Bet]:
     """Actionable bets, best first.
 
@@ -630,20 +663,31 @@ def rank_bets(bets: Sequence[Bet]) -> list[Bet]:
     return sorted((b for b in bets if b.actionable), key=key)
 
 
-def best_bet(bets: Sequence[Bet]) -> Bet | None:
-    """The single bet to place, or None. The definitive answer."""
-    ranked = rank_bets(bets)
+def best_bet(bets: Sequence[Bet], pred: Any = None) -> Bet | None:
+    """The single bet to place, or None. The definitive answer.
+
+    With `pred`, only bets that win if the predicted score holds qualify.
+    """
+    ranked = split_by_prediction(bets, pred)[0] if pred is not None else rank_bets(bets)
     return ranked[0] if ranked else None
 
 
-def the_call(bets: Sequence[Bet]) -> str:
+def the_call(bets: Sequence[Bet], pred: Any = None) -> str:
     """One sentence a person can act on without reading the table.
 
     Five rows of BET/SMALL/NO is a finding, not an instruction. This states
     the instruction, including when the instruction is to do nothing -- which
     it usually is, and which is a real answer rather than a shrug.
     """
-    ranked = rank_bets(bets)
+    if pred is not None:
+        ranked, longshots = split_by_prediction(bets, pred)
+        if not ranked:
+            if longshots:
+                return ("No bet on the predicted outcome clears its bar. "
+                        "Value against the prediction is listed under Longshots.")
+            return "Do not bet this game. None of the five clears its bar."
+    else:
+        ranked = rank_bets(bets)
     if not ranked:
         return "Do not bet this game. None of the five clears its bar."
 
