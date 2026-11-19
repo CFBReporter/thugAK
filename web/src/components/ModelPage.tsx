@@ -12,8 +12,10 @@ import { Card, Empty, Failed, Skeletons } from './bits'
  */
 
 const SERIES = {
-  model: { name: 'Model', color: '#5b8cff', dash: undefined },
-  book: { name: 'Sportsbook line', color: '#cf5aa8', dash: '5 4' },
+  // Theme tokens (validated per theme in styles.css). Applied through
+  // `style`, because SVG presentation attributes do not resolve var().
+  model: { name: 'Model', color: 'var(--series-model)', dash: undefined },
+  book: { name: 'Sportsbook line', color: 'var(--series-book)', dash: '5 4' },
 } as const
 
 function pts(x: number | null | undefined, digits = 1): string {
@@ -121,7 +123,7 @@ function AccuracyChart({ weeks }: { weeks: AccuracyWeek[] }) {
         {Object.values(SERIES).map((s) => (
           <span key={s.name}>
             <svg width="22" height="8">
-              <line x1="1" y1="4" x2="21" y2="4" stroke={s.color} strokeWidth="2" strokeDasharray={s.dash} />
+              <line x1="1" y1="4" x2="21" y2="4" style={{ stroke: s.color }} strokeWidth="2" strokeDasharray={s.dash} />
             </svg>
             {s.name}
           </span>
@@ -141,11 +143,11 @@ function AccuracyChart({ weeks }: { weeks: AccuracyWeek[] }) {
             </text>
           </g>
         ))}
-        <path d={line((w) => w.book_mae_margin)} fill="none" stroke={SERIES.book.color} strokeWidth="2" strokeDasharray={SERIES.book.dash} />
-        <path d={line((w) => w.mae_margin)} fill="none" stroke={SERIES.model.color} strokeWidth="2" />
+        <path d={line((w) => w.book_mae_margin)} fill="none" style={{ stroke: SERIES.book.color }} strokeWidth="2" strokeDasharray={SERIES.book.dash} />
+        <path d={line((w) => w.mae_margin)} fill="none" style={{ stroke: SERIES.model.color }} strokeWidth="2" />
         {pts2.map((w, i) =>
           w.mae_margin !== undefined ? (
-            <circle key={w.week} cx={x(i)} cy={y(w.mae_margin)} r="4" fill={SERIES.model.color} stroke="var(--surface)" strokeWidth="2" />
+            <circle key={w.week} cx={x(i)} cy={y(w.mae_margin)} r="4" style={{ fill: SERIES.model.color, stroke: 'var(--surface)' }} strokeWidth="2" />
           ) : null,
         )}
         {/* direct labels at the right end */}
@@ -296,6 +298,7 @@ export function ModelPage({ league }: { league: string }) {
 
   return (
     <div className="model-page">
+      <HowItWorks />
       <Current o={o} />
       <Card title="Accuracy by week">
         {accuracy.data ? <AccuracyChart weeks={accuracy.data.live} /> : <Skeletons n={1} />}
@@ -307,5 +310,120 @@ export function ModelPage({ league }: { league: string }) {
         {record.data ? <Record games={record.data.games} /> : <Skeletons n={2} />}
       </Card>
     </div>
+  )
+}
+
+
+/** A plain-language explanation of the model, collapsed until opened. */
+function HowItWorks() {
+  return (
+    <details className="card explainer">
+      <summary>
+        How the model works <span className="hint">-- tap to read</span>
+      </summary>
+      <div className="ex-body">
+        <section>
+          <h3>1. Predicting the score</h3>
+          <p>
+            Every prediction starts from what each team has actually done this season, using only
+            information available an hour before kickoff:
+          </p>
+          <ul>
+            <li>
+              <b>Recent form.</b> Points scored and allowed over the last 3 games, the last 7, and
+              the season so far, blended with weights measured from past seasons.
+            </li>
+            <li>
+              <b>Strength of opponents.</b> A power rating for every team, solved from all of
+              this season&apos;s results, so 30 points against a strong defence counts for more
+              than 30 against a weak one.
+            </li>
+            <li>
+              <b>Home advantage,</b> measured per league from past results (none at a neutral
+              site).
+            </li>
+            <li>
+              <b>Injuries.</b> For the NFL and NBA, the injury report and how the team has played
+              with and without each player. For college, where injury reports are unreliable,
+              which regulars have stopped appearing in box scores.
+            </li>
+          </ul>
+        </section>
+
+        <section>
+          <h3>2. Learned corrections</h3>
+          <p>
+            Every Monday the model replays every finished game from the last three seasons, as if
+            it were an hour before kickoff, and measures how far off it was. From thousands of
+            those misses it learns where it is <b>consistently</b> wrong, for example:
+          </p>
+          <ul>
+            <li>teams on the second night of a back-to-back, and days of rest</li>
+            <li>extra uncertainty early in a season</li>
+            <li>a league scoring more or less than usual this season</li>
+            <li>when the power ratings disagree with recent form</li>
+          </ul>
+          <p>
+            Open <b>&quot;why this score&quot;</b> under any prediction to see each of these steps
+            for that game.
+          </p>
+        </section>
+
+        <section>
+          <h3>3. The market is an input, not the answer</h3>
+          <p>
+            Where a sportsbook line exists, it can nudge the predicted score, but by{' '}
+            <b>at most 15%</b> of the gap, and only if that has helped on past games. Kalshi
+            prices never change the predicted score; they are used for pricing the bets.
+          </p>
+        </section>
+
+        <section>
+          <h3>4. How it gets better</h3>
+          <ol>
+            <li>
+              Each week a new version is trained on every game except the most recent three weeks.
+            </li>
+            <li>It is then tested on those three weeks, which it has never seen.</li>
+            <li>
+              It goes live only if its predicted scores are closer to the real ones than the
+              current version&apos;s. Otherwise the current version stays.
+            </li>
+          </ol>
+          <p>
+            Each league trains separately, so one league can be on v3 while another is still on
+            v1. Every attempt, kept or not, is listed in the <b>Model log</b> below.
+          </p>
+        </section>
+
+        <section>
+          <h3>5. From scores to bets</h3>
+          <p>
+            The predicted margin and total, together with how much the model typically misses by,
+            give a probability for every outcome: who wins, by how much, over or under. Those
+            probabilities are compared with Kalshi&apos;s prices after fees to decide which bets,
+            if any, are worth making. Most games have none.
+          </p>
+        </section>
+
+        <section>
+          <h3>Reading the numbers</h3>
+          <ul>
+            <li>
+              <b>Avg miss</b> is the average number of points between the predicted and actual
+              margin (or total). Lower is better.
+            </li>
+            <li>
+              <b>Sportsbook line</b> is shown on the same games as a yardstick: how close the
+              betting market itself came.
+            </li>
+            <li>
+              Single games are noisy. Even a good model misses an NBA margin by about 10 points on
+              average, so judge it over many games, not one.
+            </li>
+          </ul>
+        </section>
+      </div>
+    </details>
   )
 }

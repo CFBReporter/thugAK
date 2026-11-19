@@ -40,7 +40,29 @@ const LEAGUES = [
  * games were still being played. The server knows the Central date because
  * v1's localtime module is the single clock.
  */
+type Theme = 'light' | 'dark'
+
+/** The theme in force: the reader's saved choice (set before render by the
+ * script in index.html), else the device's own setting. */
+function currentTheme(): Theme {
+  const set = document.documentElement.dataset.theme
+  if (set === 'light' || set === 'dark') return set
+  return window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
+}
+
 export default function App() {
+  const [theme, setTheme] = useState<Theme>(currentTheme)
+  function toggleTheme() {
+    const next: Theme = theme === 'dark' ? 'light' : 'dark'
+    document.documentElement.dataset.theme = next
+    try {
+      localStorage.setItem('thugsak-theme', next)
+    } catch {
+      /* private mode: the choice lasts for this visit only */
+    }
+    setTheme(next)
+  }
+
   const [league, setLeague] = useState<string>('nfl')
   const [date, setDate] = useState<string | null>(null)
   const [picked, setPicked] = useState<GameRow | null>(null)
@@ -125,6 +147,15 @@ export default function App() {
           </nav>
 
           <div className="hdr-sp" />
+
+          <button
+            className="theme-btn"
+            onClick={toggleTheme}
+            aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            title={theme === 'dark' ? 'Light mode' : 'Dark mode'}
+          >
+            {theme === 'dark' ? '\u2600' : '\u263E'}
+          </button>
 
           <div className="hdr-meta">
             <span>All times {tz}</span>
