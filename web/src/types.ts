@@ -166,6 +166,8 @@ export interface RecommendationResponse {
 
   mode: 'lookback' | 'pre-game'
   result?: LookbackResult
+  /** The model that made this prediction, and the steps it took. */
+  model?: ModelBlock
   bets_graded?: string
   lookback_note?: string
   lookback_caveats?: string[]
@@ -237,4 +239,93 @@ export interface HealthResponse {
   providers: ProviderInfo[]
   today: string
   timezone: string
+}
+
+// ---- the model (Model page + the label on each prediction) ----------------
+
+export interface Accuracy {
+  n: number
+  mae_margin?: number
+  mae_total?: number
+  mae_points?: number
+  winner_pct?: number | null
+  book_mae_margin?: number | null
+  book_mae_total?: number | null
+  book_n?: number
+}
+
+export interface Adjustment {
+  label: string
+  home: number
+  away: number
+}
+
+/** Which model made a prediction, and how it got from the engine to the score. */
+export interface ModelBlock {
+  version: string
+  live_since: string | null
+  avg_miss_margin: number | null
+  avg_miss_total: number | null
+  avg_miss_basis: string | null
+  base_points: { home: number | null; away: number | null }
+  adjustments: Adjustment[]
+  final_points: { home: number | null; away: number | null }
+}
+
+export interface ModelOverview {
+  league: string
+  version: string
+  live_since: string | null
+  trained_on_games: number | null
+  uses_correction: boolean
+  holdout: Accuracy | null
+  holdout_book: { n: number; mae_margin?: number; mae_total?: number } | null
+  previous: Accuracy | null
+  previous_version: string | null
+  live_4_weeks: Accuracy
+  live_all: Accuracy
+  calibration_fitted_at: string | null
+}
+
+export interface ModelRun {
+  league: string
+  version: string
+  trained_at: string
+  promoted: boolean
+  note: string | null
+  changes: { settings: string[]; learned: string[] }
+  holdout_games: number | null
+  holdout_from: string | null
+  candidate: Accuracy | null
+  champion: Accuracy | null
+  champion_version: string | null
+  book: { n: number; mae_margin?: number; mae_total?: number } | null
+  gain_pct: number | null
+}
+
+export interface GradedGame {
+  game_id: string
+  league: string
+  date: string
+  matchup: string | null
+  version: string
+  predicted: [number, number]
+  final: [number, number]
+  miss_margin: number
+  miss_total: number
+  miss_points: number
+  right_winner: boolean
+  decided: boolean
+  book_miss_margin: number | null
+  book_miss_total: number | null
+}
+
+export interface AccuracyWeek extends Accuracy {
+  week: string
+}
+
+export interface ModelAccuracy {
+  league: string
+  live: AccuracyWeek[]
+  replayed: unknown[]
 }

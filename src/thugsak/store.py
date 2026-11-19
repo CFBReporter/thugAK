@@ -247,6 +247,20 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     error       TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_runs_agent ON agent_runs(agent, started_at);
+
+-- The model's training log (see migrations/postgres/0002_model_runs.sql).
+CREATE TABLE IF NOT EXISTS model_runs (
+    run_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    league      TEXT NOT NULL,
+    version     TEXT NOT NULL,
+    trained_at  TEXT NOT NULL,
+    promoted    INTEGER NOT NULL DEFAULT 0,
+    model       TEXT,
+    metrics     TEXT,
+    changes     TEXT,
+    note        TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_model_runs_league ON model_runs(league, trained_at);
 """
 
 
@@ -735,6 +749,7 @@ def espn_id_for(conn: Any, team_id: str) -> str:
 # whenever any statement in this process writes the tables they mirror.
 
 READ_CACHE_TTL = 300.0
+_ACTIVE_MODEL_CACHE: dict[tuple[str, str], tuple[float, Any]] = {}
 _HISTORY_CACHE: dict[tuple[Any, ...], tuple[float, list[Any]]] = {}
 _CALIBRATION_CACHE: dict[tuple[str, str], tuple[float, dict[str, float]]] = {}
 
@@ -742,6 +757,7 @@ _CALIBRATION_CACHE: dict[tuple[str, str], tuple[float, dict[str, float]]] = {}
 def invalidate_read_caches() -> None:
     _HISTORY_CACHE.clear()
     _CALIBRATION_CACHE.clear()
+    _ACTIVE_MODEL_CACHE.clear()
 
 
 def _on_db_write(sql: str) -> None:
@@ -752,6 +768,8 @@ def _on_db_write(sql: str) -> None:
         GAME_INDEX.clear()
     if "calibration" in s:
         _CALIBRATION_CACHE.clear()
+    if "model_runs" in s:
+        _ACTIVE_MODEL_CACHE.clear()
     # The alias/teams caches are kept in step explicitly by add_alias,
     # upsert_team and invalidate_name_caches; clearing them on every alias
     # insert would reload the table once per newly registered name.
@@ -1794,3 +1812,62 @@ def trim_player_detail(
     )
     out["detail_nulled"] = cur.rowcount
     return out
+
+
+# --------------------------------------------------------------------------
+# model versions (the training log)
+# --------------------------------------------------------------------------
+
+def save_model_run(
+    conn: Any, league: str, version: str, *, promoted: bool,
+    model: Any = None, metrics: Any = None, changes: Any = None, note: str | None = None,
+) -> int:
+    cur = conn.execute(
+        """INSERT INTO model_runs (league, version, trained_at, promoted, model, metrics, changes, note)
+           VALUES (?,?,?,?,?,?,?,?) RETURNING run_id""",
+        (
+            league, version, utcnow(), 1 if promoted else 0,
+            json.dumps(model) if model is not None else None,
+            json.dumps(metrics) if metrics is not None else None,
+            json.dumps(changes) if changes is not None else None,
+            note,
+        ),
+    )
+    _ACTIVE_MODEL_CACHE.clear()
+    return int(cur.fetchone()[0])
+
+
+def _decode_run(r: Any) -> dict[str, Any]:
+    d = dict(r)
+    for k in ("model", "metrics", "changes"):
+        d[k] = json.loads(d[k]) if d.get(k) else None
+    d["promoted"] = bool(d["promoted"])
+    return d
+
+
+def active_model_run(conn: Any, league: str) -> dict[str, Any] | None:
+    """The league's live model: its latest promoted training run, or None
+    (the engine alone, version v1). Cached; cleared on any model_runs write."""
+    def load() -> dict[str, Any] | None:
+        r = conn.execute(
+            "SELECT * FROM model_runs WHERE league=? AND promoted=1 "
+            "ORDER BY trained_at DESC, run_id DESC LIMIT 1",
+            (league,),
+        ).fetchone()
+        return _decode_run(r) if r else None
+
+    if not is_postgres(conn):
+        return load()
+    return _cached(_ACTIVE_MODEL_CACHE, (db_ident(conn), league), load)
+
+
+def model_runs(conn: Any, league: str | None = None, *, limit: int = 100) -> list[dict[str, Any]]:
+    """The training log, newest first (promoted and rejected)."""
+    q = "SELECT * FROM model_runs"
+    args: list[Any] = []
+    if league:
+        q += " WHERE league=?"
+        args.append(league)
+    q += " ORDER BY trained_at DESC, run_id DESC LIMIT ?"
+    args.append(limit)
+    return [_decode_run(r) for r in conn.execute(q, args).fetchall()]

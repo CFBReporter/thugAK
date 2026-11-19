@@ -33,7 +33,7 @@ from typing import Any, Sequence
 
 from .. import store
 from ..config import league as get_league
-from . import asof, gamelog, injuries as injuries_mod, ratings as ratings_mod
+from . import asof, correction as correction_mod, gamelog, injuries as injuries_mod, ratings as ratings_mod
 
 MODEL_VERSION = "v1"
 
@@ -111,6 +111,15 @@ class Prediction:
     away_form: dict[str, Any] = field(default_factory=dict)
     weights: dict[str, float] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+
+    # The learned layer (model/correction.py): the engine's own score before
+    # it, the readable steps it applied, and the inputs it saw. `model_version`
+    # is the league's active trained model, "v1" when none has been promoted.
+    model_version: str = "v1"
+    base_home_points: float | None = None
+    base_away_points: float | None = None
+    adjustments: list[dict[str, Any]] = field(default_factory=list)
+    features: dict[str, float] = field(default_factory=dict)
 
     @property
     def spread(self) -> float | None:
@@ -247,12 +256,17 @@ def predict_game(
     market_total: float | None = None,
     market_home_prob: float | None = None,
     espn_predictor_prob: float | None = None,
+    model: Any = "active",
 ) -> Prediction:
     """Predict one game as of kickoff minus the standard lead time.
 
     `market_spread` follows the sportsbook convention (negative = home
     favoured) and is flipped internally to the home-relative convention used
     throughout this module.
+
+    `model`: "active" applies the league's promoted correction layer (if
+    any); None gives the engine alone -- what the replay trains on; a model
+    run dict applies that specific version.
     """
     home, away = game["home_team"], game["away_team"]
     as_of = as_of or asof.as_of_for_kickoff(game["start_time"])
@@ -322,6 +336,39 @@ def predict_game(
         if hd is not None:
             home_pts += (hd - hfa) / 4.0
 
+    # --- learned correction -------------------------------------------------
+    pred.base_home_points = round(home_pts, 2)
+    pred.base_away_points = round(away_pts, 2)
+    pr_margin_for_features = rs.predicted_margin(home, away, neutral=neutral)
+
+    def _rest(team: str) -> float | None:
+        last = store.team_games_before(conn, team, as_of, limit=1)
+        if not last:
+            return None
+        return (asof.parse_ts(as_of) - asof.parse_ts(last[0]["start_time"])).total_seconds() / 86400.0
+
+    pred.features = correction_mod.features(
+        base_margin=home_pts - away_pts,
+        base_total=home_pts + away_pts,
+        rating_margin=pr_margin_for_features,
+        games_home=hf.games_played,
+        games_away=af.games_played,
+        rest_home=_rest(home),
+        rest_away=_rest(away),
+        neutral=neutral,
+    )
+    run = store.active_model_run(conn, league) if model == "active" else model
+    corr = None
+    if run:
+        # A promoted version may carry new settings only (no correction).
+        pred.model_version = run["version"]
+    if run and run.get("model") and run["model"].get("correction"):
+        corr = correction_mod.Correction.from_dict(run["model"]["correction"])
+        dm, dt, steps = corr.adjust(pred.features)
+        margin, total = home_pts - away_pts + dm, home_pts + away_pts + dt
+        home_pts, away_pts = (total + margin) / 2, (total - margin) / 2
+        pred.adjustments.extend(steps)
+
     # Injuries.
     if injury_impacts:
         h_adj, h_conf = injuries_mod.team_adjustment(injury_impacts.get(home, []))
@@ -349,6 +396,27 @@ def predict_game(
             for team, lst in injury_impacts.items()
             for i in lst
         ]
+
+    if injury_impacts and (pred.injury_adj_home or pred.injury_adj_away):
+        pred.adjustments.append({
+            "label": "Injuries", "home": round(pred.injury_adj_home, 2),
+            "away": round(pred.injury_adj_away, 2),
+        })
+
+    # Market input, capped: the line nudges the score by a learned weight
+    # (at most correction.MARKET_WEIGHT_CAP); it never sets it.
+    if corr is not None and (market_spread is not None or market_total is not None):
+        m0, t0 = home_pts - away_pts, home_pts + away_pts
+        m1 = correction_mod.blend_market(
+            m0, -market_spread if market_spread is not None else None, corr.margin.market_weight)
+        t1 = correction_mod.blend_market(t0, market_total, corr.total.market_weight)
+        nh, na = (t1 + m1) / 2, (t1 - m1) / 2
+        if abs(nh - home_pts) >= 0.05 or abs(na - away_pts) >= 0.05:
+            pred.adjustments.append({
+                "label": f"Market input (sportsbook line, weight {corr.margin.market_weight:.0%}/{corr.total.market_weight:.0%})",
+                "home": round(nh - home_pts, 2), "away": round(na - away_pts, 2),
+            })
+        home_pts, away_pts = nh, na
 
     # Keep the output inside the bounds of a plausible scoreline; a value
     # outside them is a bug, and clamping silently would hide it.
@@ -433,7 +501,7 @@ def save(
             "pred_away_points": pred.away_points,
             "pred_spread": pred.spread,
             "pred_total": pred.total,
-            "model_version": MODEL_VERSION,
+            "model_version": pred.model_version,
             "payload": {
                 "sigma_margin": pred.sigma_margin,
                 "sigma_total": pred.sigma_total,
@@ -447,6 +515,8 @@ def save(
                     for a in pred.anchors
                 ],
                 "warnings": pred.warnings,
+                "base_points": [pred.base_home_points, pred.base_away_points],
+                "adjustments": pred.adjustments,
             },
         },
     )

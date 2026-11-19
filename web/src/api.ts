@@ -3,7 +3,12 @@ import type {
   EdgesResponse,
   GamesResponse,
   HealthResponse,
+  Accuracy,
+  GradedGame,
   LeaguesResponse,
+  ModelAccuracy,
+  ModelOverview,
+  ModelRun,
   PricesResponse,
   RecommendationResponse,
 } from './types'
@@ -51,6 +56,14 @@ export const api = {
     get<PricesResponse>('prices', { league, date }, signal),
   recommendation: (league: string, gameId: string, signal?: AbortSignal) =>
     get<RecommendationResponse>('recommendation', { league, game_id: gameId }, signal),
+  model: (league?: string, signal?: AbortSignal) =>
+    get<{ leagues: ModelOverview[] }>('model', { league }, signal),
+  modelLog: (league?: string, signal?: AbortSignal) =>
+    get<{ runs: ModelRun[] }>('model/log', { league }, signal),
+  modelRecord: (league?: string, signal?: AbortSignal) =>
+    get<{ games: GradedGame[]; summary: Accuracy }>('model/record', { league }, signal),
+  modelAccuracy: (league: string, signal?: AbortSignal) =>
+    get<ModelAccuracy>('model/accuracy', { league }, signal),
   /** Every ladder strike for a game, scored against the model. */
   edges: (league: string, gameId: string, signal?: AbortSignal) =>
     get<EdgesResponse>('edges', { league, game_id: gameId }, signal),

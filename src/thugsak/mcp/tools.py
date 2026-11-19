@@ -1381,7 +1381,7 @@ async def get_recommendation(
                     ],
                     the_call=verdict_mod.the_call(bets),
                     money_usd=round(gm.total_traded, 2),
-                    model_version=predict_mod.MODEL_VERSION,
+                    model_version=pred.model_version,
                 )
                 store.settle_predictions(conn, league)
 
@@ -1396,6 +1396,10 @@ async def get_recommendation(
                 )
             conn.commit()
 
+    from ..model import report as report_mod  # noqa: PLC0415
+
+    with store.connect(db, readonly=True) as _rc:
+        model_badge = report_mod.badge_conn(_rc, league)
     return {
         "game_id": game_id,
         "league": league,
@@ -1429,6 +1433,15 @@ async def get_recommendation(
         "based_on": outlook.based_on,
         "versus_the_sportsbook": outlook.market_check or None,
         "prediction_cautions": outlook.cautions,
+
+        # Which model made this, and how it got from the engine's score to
+        # the one shown: the readable steps of the learned layer.
+        "model": {
+            **model_badge,
+            "base_points": {"home": pred.base_home_points, "away": pred.base_away_points},
+            "adjustments": pred.adjustments,
+            "final_points": {"home": pred.home_points, "away": pred.away_points},
+        },
 
         # 2. the call -- the single thing to do, before any table
         "the_call": verdict_mod.the_call(bets),

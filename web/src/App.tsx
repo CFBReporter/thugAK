@@ -3,6 +3,7 @@ import { api, useAsync } from './api'
 import { prettyDate, shiftDate } from './format'
 import { GameDetail } from './components/GameDetail'
 import { GameList } from './components/GameList'
+import { ModelPage } from './components/ModelPage'
 import { Failed, Skeletons } from './components/bits'
 import type { GameRow, GamesResponse, PricesResponse } from './types'
 
@@ -43,6 +44,8 @@ export default function App() {
   const [league, setLeague] = useState<string>('nfl')
   const [date, setDate] = useState<string | null>(null)
   const [picked, setPicked] = useState<GameRow | null>(null)
+  // 'model' shows the Model page for the selected league.
+  const [view, setView] = useState<'slate' | 'model'>('slate')
 
   const health = useAsync(() => api.health(), [])
   const today = health.data?.today ?? null
@@ -107,6 +110,20 @@ export default function App() {
             ))}
           </nav>
 
+          <nav className="tabs" aria-label="View">
+            <button
+              className="tab"
+              aria-pressed={view === 'model'}
+              aria-selected={view === 'model'}
+              onClick={() => {
+                setView(view === 'model' ? 'slate' : 'model')
+                setPicked(null)
+              }}
+            >
+              Model
+            </button>
+          </nav>
+
           <div className="hdr-sp" />
 
           <div className="hdr-meta">
@@ -124,7 +141,9 @@ export default function App() {
           />
         ) : null}
 
-        {!picked && activeDate ? (
+        {view === 'model' ? <ModelPage league={league} /> : null}
+
+        {view === 'slate' && !picked && activeDate ? (
           <div className="bar">
             <div className="datenav">
               <button onClick={() => nudge(-1)} aria-label="Previous day">
@@ -166,7 +185,7 @@ export default function App() {
           </div>
         ) : null}
 
-        {picked ? (
+        {view === 'model' ? null : picked ? (
           <GameDetail league={league} game={picked} onBack={() => setPicked(null)} />
         ) : games.loading ? (
           <Skeletons />

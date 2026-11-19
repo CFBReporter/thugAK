@@ -37,6 +37,7 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
 from thugsak import config, db, localtime, providers  # noqa: E402
 from thugsak.mcp import tools  # noqa: E402
+from thugsak.model import report  # noqa: E402
 
 app = FastAPI(
     title="thugsak",
@@ -186,6 +187,30 @@ async def games(
     so the page renders without waiting on Kalshi. `/api/prices` has live.
     """
     return await _call(tools.list_games, league, date, prices="snapshot")
+
+
+@app.get("/api/model")
+async def model_overview(league: str | None = Query(None)) -> Any:
+    """The active model per league: version, held-out and live accuracy."""
+    return await _call(report.overview, league)
+
+
+@app.get("/api/model/log")
+async def model_log(league: str | None = Query(None)) -> Any:
+    """Every weekly training run, promoted or kept out, with what changed."""
+    return await _call(report.log, league)
+
+
+@app.get("/api/model/record")
+async def model_record(league: str | None = Query(None), limit: int = Query(300, ge=1, le=2000)) -> Any:
+    """Graded predictions: predicted vs final score, the miss, the version."""
+    return await _call(report.record, league, limit=limit)
+
+
+@app.get("/api/model/accuracy")
+async def model_accuracy(league: str = Query(...)) -> Any:
+    """Weekly accuracy: the live record and the latest replayed weeks."""
+    return await _call(report.accuracy, league)
 
 
 @app.get("/api/prices")

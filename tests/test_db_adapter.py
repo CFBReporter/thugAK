@@ -88,10 +88,11 @@ def test_migration_files_are_ordered_and_numbered():
     assert files[0].name == "0001_initial.sql"
 
 
-def test_initial_migration_locks_every_table_with_rls():
+@pytest.mark.parametrize("index", range(len(db.migration_files())))
+def test_every_migration_locks_its_tables_with_rls(index):
     import re as _re
 
-    sql = _re.sub(r"--[^\n]*", "", db.migration_files()[0].read_text(encoding="utf-8"))
+    sql = _re.sub(r"--[^\n]*", "", db.migration_files()[index].read_text(encoding="utf-8"))
     created = set(__import__("re").findall(r"CREATE TABLE IF NOT EXISTS (\w+)", sql))
     locked = set(__import__("re").findall(r"ALTER TABLE (\w+)\s+ENABLE ROW LEVEL SECURITY", sql))
     assert created == locked, created ^ locked

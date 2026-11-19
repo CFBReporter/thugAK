@@ -82,6 +82,8 @@ export function GameDetail({
               </div>
             ) : null}
 
+            {data.model ? <ModelLine model={data.model} /> : null}
+
             <div className="score-sub">
               <div className="kv">
                 <span className="k">Result</span>
@@ -211,5 +213,66 @@ export function GameDetail({
         </>
       ) : null}
     </>
+  )
+}
+
+
+/** Which model made this prediction, how accurate it has been, and -- on
+ * tap -- the steps from the engine's score to the one shown. */
+function ModelLine({ model }: { model: import('../types').ModelBlock }) {
+  const since = model.live_since
+    ? new Date(model.live_since).toLocaleDateString('en-US', {
+        weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/Chicago',
+      })
+    : null
+  const miss =
+    model.avg_miss_margin !== null && model.avg_miss_margin !== undefined
+      ? ` · avg miss ±${model.avg_miss_margin.toFixed(1)} pts margin (${model.avg_miss_basis})`
+      : ''
+  const b = model.base_points
+  const f = model.final_points
+  return (
+    <details className="model-line">
+      <summary>
+        Model {model.version}
+        {since ? ` · trained ${since}` : ' · engine as calibrated'}
+        {miss}
+        <span className="why"> · why this score</span>
+      </summary>
+      <table className="why-table">
+        <thead>
+          <tr>
+            <th />
+            <th>Away</th>
+            <th>Home</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Engine (form + opponent strength + home advantage)</td>
+            <td>{b.away?.toFixed(1) ?? '--'}</td>
+            <td>{b.home?.toFixed(1) ?? '--'}</td>
+          </tr>
+          {model.adjustments.map((a) => (
+            <tr key={a.label}>
+              <td>{a.label}</td>
+              <td>{a.away >= 0 ? '+' : ''}{a.away.toFixed(1)}</td>
+              <td>{a.home >= 0 ? '+' : ''}{a.home.toFixed(1)}</td>
+            </tr>
+          ))}
+          <tr className="total">
+            <td>Prediction</td>
+            <td>{f.away?.toFixed(1) ?? '--'}</td>
+            <td>{f.home?.toFixed(1) ?? '--'}</td>
+          </tr>
+        </tbody>
+      </table>
+      {model.adjustments.length === 0 ? (
+        <div className="why-note">
+          No learned adjustments: this league is on the engine as calibrated, because no trained
+          version has yet predicted recent scores better.
+        </div>
+      ) : null}
+    </details>
   )
 }
