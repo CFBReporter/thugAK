@@ -965,23 +965,35 @@ def update_market_line(
     total: float | None = None,
     home_ml: int | None = None,
     away_ml: int | None = None,
+    overwrite: bool = False,
 ) -> None:
     """Fill in a game's sportsbook line without touching anything else.
+
+    `overwrite=True` (the hourly line job, close to kickoff) lets a fresh
+    line replace a stored one, so what is kept is near the closing line --
+    the most accurate pre-game number, and the one the model compares with.
+    A missing value never replaces a stored one either way.
 
     A whole-row upsert is the wrong tool for this: it would need every NOT
     NULL column restated, and a caller that only has odds does not have them.
     COALESCE keeps whatever is already recorded, so a line captured earlier
     (closer to the real close) is never overwritten by a later blank.
     """
-    conn.execute(
-        """UPDATE games SET
+    if overwrite:
+        sql = """UPDATE games SET
+             close_spread  = COALESCE(?, close_spread),
+             close_total   = COALESCE(?, close_total),
+             close_home_ml = COALESCE(?, close_home_ml),
+             close_away_ml = COALESCE(?, close_away_ml)
+           WHERE game_id = ?"""
+    else:
+        sql = """UPDATE games SET
              close_spread  = COALESCE(close_spread, ?),
              close_total   = COALESCE(close_total, ?),
              close_home_ml = COALESCE(close_home_ml, ?),
              close_away_ml = COALESCE(close_away_ml, ?)
-           WHERE game_id = ?""",
-        (spread, total, home_ml, away_ml, game_id),
-    )
+           WHERE game_id = ?"""
+    conn.execute(sql, (spread, total, home_ml, away_ml, game_id))
 
 
 def count_games(conn: sqlite3.Connection, league: str | None = None) -> dict[int, int]:

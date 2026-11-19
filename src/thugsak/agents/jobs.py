@@ -14,6 +14,9 @@ Per league, each run:
   3. box scores for finished games in the slate scope not yet stored
   4. Kalshi prices -> the saved slate snapshot pages open on
   5. the prediction record for games starting within RECORD_WINDOW_HOURS
+  6. sportsbook lines for today's and tomorrow's upcoming games: fetched
+     once when missing, and refreshed (overwriting) inside the record window
+     so the stored line is close to the closing line
 Once a day (first run after DAILY_EVERY_SECONDS): player logs and depth
 charts for the slate's teams, retention, the integrity audit, cache trim.
 """
@@ -70,6 +73,66 @@ def games_needing_box_scores(conn, league: str, game_ids: list[str]) -> list[str
         game_ids,
     ).fetchall()
     return [r["game_id"] for r in rows]
+
+
+def games_needing_lines(conn, league: str, dates: list[str], *,
+                        now: datetime | None = None) -> list[tuple[str, bool]]:
+    """(game_id, overwrite) for upcoming games: those with no line yet, and --
+    overwriting -- those kicking off within RECORD_WINDOW_HOURS."""
+    now = now or datetime.now(timezone.utc)
+    horizon = now + timedelta(hours=RECORD_WINDOW_HOURS)
+    out: list[tuple[str, bool]] = []
+    for d in dates:
+        for r in store.games_on_date(conn, league, d):
+            start = _parse(r["start_time"])
+            if r["completed"] or start is None or start < now:
+                continue
+            soon = start <= horizon
+            missing = r["close_spread"] is None or r["close_total"] is None
+            if missing or soon:
+                out.append((r["game_id"], soon))
+    return out
+
+
+async def save_lines(league: str, dates: list[str], *, db: str) -> dict[str, Any]:
+    """Store ESPN's per-game sportsbook line (pickcenter) for upcoming games.
+
+    The scoreboard carries odds for featured games only (NBA: 49 of 3,670
+    stored games had a line), which left the model's market input and the
+    sportsbook yardstick almost empty outside the NFL.
+    """
+    from .. import cache as cache_mod  # noqa: PLC0415
+    from ..mcp import tools as t  # noqa: PLC0415
+
+    with store.connect(db, readonly=True) as conn:
+        todo = games_needing_lines(conn, league, dates)
+    saved, none, failed = 0, 0, 0
+    if not todo:
+        return {"checked": 0, "saved": 0}
+    async with cache_mod.make_client() as client:
+        async with t._provider().session(client) as ec:
+            for gid, overwrite in todo:
+                espn_id = gid.split(":")[-1]
+                if not espn_id.isdigit():
+                    continue
+                try:
+                    lines = ec.parse_pickcenter(await ec.summary(league, espn_id))
+                except Exception:
+                    failed += 1
+                    continue
+                best = next((ln for ln in lines if ln.home_ml is not None), None) or (
+                    lines[0] if lines else None)
+                if best is None or (best.spread is None and best.total is None):
+                    none += 1
+                    continue
+                with store.connect(db) as conn:
+                    store.update_market_line(
+                        conn, gid, spread=best.spread, total=best.total,
+                        home_ml=best.home_ml, away_ml=best.away_ml, overwrite=overwrite,
+                    )
+                    conn.commit()
+                saved += 1
+    return {"checked": len(todo), "saved": saved, "no_line_published": none, "failed": failed}
 
 
 def games_to_record(conn, league: str, date: str, *, now: datetime | None = None) -> list[str]:
@@ -130,6 +193,11 @@ async def _league(league: str, date: str, *, daily: bool, db: str) -> dict[str, 
     with step("prices"):
         m = await gate.fetch_market_state(league, date, db=db)
         out["prices"] = {"games_with_markets": len(m["markets"])}
+
+    # Lines before the record step, so recorded predictions see them.
+    with step("lines"):
+        tomorrow = (datetime.strptime(date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        out["lines"] = await save_lines(league, [date, tomorrow], db=db)
 
     with step("record"):
         with store.connect(db, readonly=True) as conn:

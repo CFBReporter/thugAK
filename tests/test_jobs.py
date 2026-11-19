@@ -83,6 +83,11 @@ def _stub(monkeypatch, *, fail_injuries=False):
 
     monkeypatch.setattr(tools, "get_recommendation", no_rec)
 
+    async def no_lines(league, dates, *, db):
+        return {"checked": 0, "saved": 0}
+
+    monkeypatch.setattr(jobs, "save_lines", no_lines)
+
 
 def test_a_failed_step_is_partial_and_the_rest_still_run(db, monkeypatch):
     _stub(monkeypatch, fail_injuries=True)
@@ -102,3 +107,28 @@ def test_daily_tier_runs_once_then_waits(db, monkeypatch):
         rows = conn.execute("SELECT status, summary FROM agent_runs WHERE agent='jobs' ORDER BY run_id").fetchall()
     assert [r["status"] for r in rows] == ["ok", "ok"]
     assert json.loads(rows[0]["summary"])["daily_ran"] is True
+
+
+def test_lines_fetched_when_missing_and_refreshed_near_kickoff(db):
+    now = datetime(2026, 11, 19, 22, 0, tzinfo=timezone.utc)
+    with store.connect(db) as conn:
+        store.upsert_game(conn, _g("nolinelater", "2026-11-20T04:00:00+00:00", 0))
+        store.upsert_game(conn, {**_g("haslinesoon", "2026-11-20T00:00:00+00:00", 0),
+                                 "close_spread": -3.5, "close_total": 220.5})
+        store.upsert_game(conn, {**_g("haslinelater", "2026-11-20T04:30:00+00:00", 0),
+                                 "close_spread": -1.5, "close_total": 210.5})
+        store.upsert_game(conn, _g("started", "2026-11-19T21:00:00+00:00", 0))
+        conn.commit()
+        got = dict(jobs.games_needing_lines(conn, L, ["2026-11-19"], now=now))
+    assert got == {"nolinelater": False, "haslinesoon": True}
+
+
+def test_overwrite_keeps_the_closing_line_but_never_blanks_one(db):
+    with store.connect(db) as conn:
+        store.upsert_game(conn, _g("g", "2026-11-20T00:00:00+00:00", 0))
+        store.update_market_line(conn, "g", spread=-3.0, total=220.0)
+        store.update_market_line(conn, "g", spread=-5.0, total=None)          # no overwrite: first kept
+        assert store.get_game(conn, "g")["close_spread"] == -3.0
+        store.update_market_line(conn, "g", spread=-4.5, total=None, overwrite=True)
+        row = store.get_game(conn, "g")
+    assert row["close_spread"] == -4.5 and row["close_total"] == 220.0
