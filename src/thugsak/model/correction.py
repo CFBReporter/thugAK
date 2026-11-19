@@ -63,6 +63,11 @@ TOTAL_FEATURES = frozenset({
     "base_total", "early_season", "rest_home", "rest_away", "b2b_home", "b2b_away",
 })
 MARKET_WEIGHT_CAP = 0.15
+# The display zero for each input (None = the league average). See adjust().
+REFERENCE: dict[str, float | None] = {
+    "base_margin": 0.0, "base_total": None, "rating_gap": 0.0, "early_season": 0.0,
+    "rest_home": None, "rest_away": None, "b2b_home": 0.0, "b2b_away": 0.0, "neutral": 0.0,
+}
 REST_CAP_DAYS = 7.0
 LAMBDAS = (1.0, 10.0, 100.0, 1000.0)
 # Recent games count more: a game's weight halves every HALF_LIFE_DAYS before
@@ -135,11 +140,27 @@ class Correction:
 
     # -- applying -----------------------------------------------------------
     def adjust(self, x: dict[str, float]) -> tuple[float, float, list[dict[str, Any]]]:
-        """(margin adjustment, total adjustment, readable breakdown)."""
+        """(margin adjustment, total adjustment, readable breakdown).
+
+        The model is fitted on centred inputs, so each step is first measured
+        against the average game. For display, each step is re-measured from
+        a natural zero instead (REFERENCE: no back-to-back, not neutral,
+        ratings agreeing with form, an even margin), so "Back-to-back" only
+        appears when a team is on one; the difference moves into
+        "League-wide bias". The sum, and so the prediction, is unchanged.
+        """
         cm = self.margin.contributions(x, self.mean, self.std)
         ct = self.total.contributions(x, self.mean, self.std)
         dm = self.margin.intercept + sum(cm.values())
         dt = self.total.intercept + sum(ct.values())
+        ref = {f: (self.mean[i] if REFERENCE.get(f) is None else REFERENCE[f])
+               for i, f in enumerate(FEATURES)}
+        rm = self.margin.contributions(ref, self.mean, self.std)
+        rt = self.total.contributions(ref, self.mean, self.std)
+        cm = {f: cm[f] - rm[f] for f in FEATURES}
+        ct = {f: ct[f] - rt[f] for f in FEATURES}
+        bias_m = dm - sum(cm.values())
+        bias_t = dt - sum(ct.values())
 
         groups: dict[str, list[float]] = {}
         for name in FEATURES:
@@ -147,8 +168,8 @@ class Correction:
             g[0] += cm[name]
             g[1] += ct[name]
         g = groups.setdefault("League-wide bias", [0.0, 0.0])
-        g[0] += self.margin.intercept
-        g[1] += self.total.intercept
+        g[0] += bias_m
+        g[1] += bias_t
         breakdown = [
             {"label": label, "home": round((t + m) / 2, 2), "away": round((t - m) / 2, 2)}
             for label, (m, t) in groups.items()

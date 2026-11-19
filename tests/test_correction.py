@@ -107,3 +107,15 @@ def test_active_model_is_the_latest_promoted_run(db):
         log = store.model_runs(conn, "nba")
     assert [r["version"] for r in log] == ["v4", "v3", "v2"]
     assert log[1]["promoted"] is False and log[1]["note"] == "kept out"
+
+
+def test_back_to_back_only_shows_when_a_team_is_on_one():
+    rows = _rows(b2b_effect=-4.0)
+    c = correction.fit(rows, league="nba", version="t")
+    rested = next(r for r in rows if r["features"]["b2b_home"] == 0)
+    tired = next(r for r in rows if r["features"]["b2b_home"] == 1)
+    _, _, steps_rested = c.adjust(rested["features"])
+    _, _, steps_tired = c.adjust(tired["features"])
+    assert not any(s["label"] == "Back-to-back" for s in steps_rested)
+    b2b = next(s for s in steps_tired if s["label"] == "Back-to-back")
+    assert b2b["home"] - b2b["away"] < -1.5
