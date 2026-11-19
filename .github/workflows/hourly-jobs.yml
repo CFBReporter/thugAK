@@ -15,8 +15,8 @@ name: hourly-jobs
 on:
   schedule:
     # 07:00-01:00 Central = 13:00-07:00 UTC (CST). At :07 past, away from the
-    # top-of-hour crush when GitHub delays scheduled runs most. During CDT
-    # (Mar-Nov) this shifts an hour earlier in Central time.
+    # top-of-hour crush when GitHub delays scheduled runs most. Cron is UTC,
+    # so during daylight time (Mar-Nov) the window is 08:00-02:00 Central.
     - cron: "7 13-23 * * *"
     - cron: "7 0-7 * * *"
   workflow_dispatch:
