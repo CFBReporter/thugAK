@@ -129,6 +129,16 @@ export default function App() {
           <div className="hdr-meta">
             <span>All times {tz}</span>
             {health.data ? <span>data: {health.data.provider}</span> : null}
+            {health.data?.built_at ? (
+              <span>
+                updated{' '}
+                {new Date(health.data.built_at).toLocaleTimeString('en-US', {
+                  hour: 'numeric',
+                  minute: '2-digit',
+                  timeZone: 'America/Chicago',
+                })}
+              </span>
+            ) : null}
           </div>
         </div>
       </header>

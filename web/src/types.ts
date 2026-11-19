@@ -239,6 +239,9 @@ export interface HealthResponse {
   providers: ProviderInfo[]
   today: string
   timezone: string
+  /** Static site only: when the data files were built (UTC ISO). */
+  built_at?: string
+  static?: boolean
 }
 
 // ---- the model (Model page + the label on each prediction) ----------------

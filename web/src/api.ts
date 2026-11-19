@@ -24,7 +24,46 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Static mode (the GitHub Pages build, VITE_STATIC=1): there is no API, so
+ * each request maps to a JSON file the hourly workflow prebuilt. The mapping
+ * must match data_path() in scripts/build_site.py.
+ */
+const STATIC = import.meta.env.VITE_STATIC === '1'
+export const IS_STATIC = STATIC
+
+function safe(part: string): string {
+  return part.replace(/[^A-Za-z0-9._-]/g, '_')
+}
+
+function staticUrl(path: string, params: Record<string, string | undefined>): string {
+  const base = import.meta.env.BASE_URL
+  if (path === 'health') return `${base}data/health.json`
+  const parts = [safe(params.league ?? 'all')]
+  if (params.date) parts.push(safe(params.date))
+  if (params.game_id) parts.push(safe(params.game_id))
+  return `${base}data/${path.replace(/\//g, '-')}/${parts.join('/')}.json`
+}
+
+async function getStatic<T>(path: string, params: Record<string, string | undefined>, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(staticUrl(path, params), { signal, cache: 'no-cache' })
+  if (!res.ok) {
+    throw new ApiError(
+      res.status === 404
+        ? 'Not available on the hosted site -- it prebuilds the last week of slates and full game views for yesterday, today and tomorrow.'
+        : `${res.status} ${res.statusText}`,
+      res.status,
+    )
+  }
+  const body = (await res.json()) as T & { __status?: number; detail?: string }
+  if (body && typeof body === 'object' && '__status' in body && body.__status) {
+    throw new ApiError(body.detail ?? 'Unavailable', body.__status)
+  }
+  return body as T
+}
+
 async function get<T>(path: string, params: Record<string, string | undefined>, signal?: AbortSignal): Promise<T> {
+  if (STATIC) return getStatic<T>(path, params, signal)
   const qs = new URLSearchParams()
   for (const [k, v] of Object.entries(params)) if (v !== undefined) qs.set(k, v)
   const url = `/api/${path}${qs.size ? `?${qs}` : ''}`
