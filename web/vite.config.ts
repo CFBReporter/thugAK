@@ -26,5 +26,12 @@ export default defineConfig({
       },
     },
   },
-  build: { outDir: 'dist', sourcemap: true },
+  build: {
+    outDir: 'dist',
+    sourcemap: true,
+    // Phones keep older browsers longer than desktops. Vite's default
+    // targets Safari 16.4 / Chrome 111; newer syntax (??=, ||=) shows a
+    // blank page on older iPhones. Transpile down to Safari 14 / Chrome 87.
+    target: ['es2020', 'safari14', 'chrome87', 'firefox78', 'edge88'],
+  },
 })
