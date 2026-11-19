@@ -53,6 +53,12 @@ jobs:
           THUGSAK_DATABASE_URL: ${{ secrets.THUGSAK_DATABASE_URL }}
           PYTHONUNBUFFERED: "1"
         run: |
+          # Without the secret the code would quietly fall back to an empty
+          # SQLite file on the runner; fail loudly instead.
+          if [ -z "$THUGSAK_DATABASE_URL" ]; then
+            echo "::error::Repository secret THUGSAK_DATABASE_URL is not set"
+            exit 1
+          fi
           mkdir -p data
           if [ "${{ inputs.daily }}" = "true" ]; then
             python -X utf8 scripts/run_jobs.py --daily
