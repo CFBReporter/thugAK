@@ -295,8 +295,14 @@ class PgConnection:
 
     def close(self) -> None:
         if self._pool is not None:
-            # Back to the pool for the next request. The pool rolls back any
-            # transaction still open, so nothing leaks between requests.
+            # Back to the pool for the next request. Read-only work leaves a
+            # transaction open; end it here so the pool does not log a
+            # "rolling back returned connection" line for every page view.
+            try:
+                if not self._conn.closed and self._conn.info.transaction_status != 0:
+                    self._conn.rollback()
+            except Exception:
+                pass  # a broken connection; the pool discards it
             self._pool.putconn(self._conn)
         else:
             self._conn.close()
@@ -395,6 +401,14 @@ def _pool_for(target: str, schema: str) -> Any:
             conn.execute(pgsql.SQL("SET search_path TO {}").format(pgsql.Identifier(schema)))
             conn.commit()
 
+    def reconnect_failed(failed: Any) -> None:
+        # The pool gave up re-opening a dropped connection (network or DNS
+        # outage longer than reconnect_timeout). psycopg_pool does not retry
+        # after that, so forget this pool; the next request builds a new one.
+        # Without this the API answered 500 for three days after one outage.
+        if _POOLS.get(key) is failed:
+            _POOLS.pop(key, None)
+
     pool = ConnectionPool(
         target,
         min_size=1,
@@ -403,12 +417,23 @@ def _pool_for(target: str, schema: str) -> Any:
         configure=configure,
         check=ConnectionPool.check_connection,
         max_idle=300,
-        timeout=30,
+        timeout=15,
+        reconnect_timeout=60,
+        reconnect_failed=reconnect_failed,
         name="thugsak",
         open=True,
     )
     _POOLS[key] = pool
     return pool
+
+
+def _discard_pool(key: str) -> None:
+    pool = _POOLS.pop(key, None)
+    if pool is not None:
+        try:
+            pool.close(timeout=0)
+        except Exception:
+            pass
 
 
 def close_pools() -> None:
@@ -437,10 +462,17 @@ def connect_postgres(
         if not target:
             raise RuntimeError(f"{ENV_VAR} is not set")
         schema = os.environ.get(SCHEMA_ENV_VAR, "").strip()
-        try:
-            pool = _pool_for(target, schema)
-            return PgConnection(pool.getconn(), pool)
-        except Exception as exc:
+        exc: Exception | None = None
+        # Two attempts: if the pool cannot hand out a connection (every slot
+        # lost to an outage that has since ended), a fresh pool usually can.
+        for _attempt in range(2):
+            try:
+                pool = _pool_for(target, schema)
+                return PgConnection(pool.getconn(), pool)
+            except Exception as e:
+                exc = e
+                _discard_pool(f"{target}#{schema}")
+        if exc is not None:
             raise RuntimeError(
                 f"could not get a connection to {redacted(target)}: "
                 f"{type(exc).__name__}: {str(exc).replace(target, redacted(target))}"

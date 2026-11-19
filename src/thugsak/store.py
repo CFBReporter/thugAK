@@ -1683,6 +1683,26 @@ def finish_agent_run(
     )
 
 
+def abandon_stale_runs(conn: Any, *, older_than_seconds: int = 2 * 3600) -> int:
+    """Close `running` rows left by a process that died or was killed.
+
+    Without this a hung or force-exited cycle stays "running" forever in the
+    log the user reads to see whether the agents are healthy.
+    """
+    from datetime import timedelta as _td
+
+    cutoff = (datetime.now(timezone.utc) - _td(seconds=older_than_seconds)).isoformat(
+        timespec="seconds"
+    )
+    cur = conn.execute(
+        "UPDATE agent_runs SET status='abandoned', finished_at=?, "
+        "error=COALESCE(error, 'process ended without finishing (hung, killed or lost network)') "
+        "WHERE status='running' AND started_at < ?",
+        (utcnow(), cutoff),
+    )
+    return cur.rowcount or 0
+
+
 def last_agent_run(
     conn: sqlite3.Connection, agent: str, *, statuses: Sequence[str] | None = None
 ) -> sqlite3.Row | None:

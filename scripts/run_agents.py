@@ -24,7 +24,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -50,6 +52,7 @@ def main() -> int:
 
     leagues = list(LEAGUES) if args.league == "all" else [args.league]
 
+    _start_watchdog()
     if args.agent == "auto":
         out = asyncio.run(runner.run_auto(
             leagues, args.date, force=args.force, dry_run=args.dry_run, db=args.db,
@@ -88,5 +91,34 @@ def _print_human(out: dict) -> None:
         print(f"error: {out['error']}")
 
 
+# A cycle normally takes 2-10 minutes. On 2026-11-16 the network dropped
+# mid-cycle and the process hung for three days; Task Scheduler's 2-hour
+# limit never stopped it, and with "do not start a new instance" every later
+# hourly run was skipped. So the process polices itself: past this limit it
+# exits hard, and the next scheduled run starts clean (the lockfile goes stale
+# and abandoned `running` rows are closed by the next cycle).
+WATCHDOG_SECONDS = int(os.environ.get("THUGSAK_AGENT_WATCHDOG_SECONDS", str(100 * 60)))
+
+
+def _start_watchdog() -> None:
+    def fire() -> None:
+        print(f"watchdog: cycle exceeded {WATCHDOG_SECONDS}s -- exiting", flush=True)
+        try:
+            from thugsak.agents import runner  # noqa: PLC0415
+            runner.LOCK_PATH.unlink(missing_ok=True)
+        except Exception:
+            pass
+        os._exit(3)
+
+    t = threading.Timer(WATCHDOG_SECONDS, fire)
+    t.daemon = True
+    t.start()
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    # Exit without waiting on leftover threads or child processes (pool
+    # workers, an SDK subprocess mid-shutdown): their cleanup is what hung.
+    os._exit(code)

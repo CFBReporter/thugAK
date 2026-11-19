@@ -374,6 +374,13 @@ async def run_auto(
         return {"status": "skipped-locked", **summary}
 
     try:
+        # Holding the lock: no other cycle is alive, so any old `running`
+        # row is from one that died (2026-11-16 left three for days).
+        with store.connect(db) as conn:
+            n = store.abandon_stale_runs(conn)
+            conn.commit()
+        if n:
+            summary["abandoned_runs_closed"] = n
         return await _run_cycle(leagues, date, force=force, dry_run=dry_run, db=db, summary=summary)
     finally:
         # Trim the HTTP cache every cycle, not only in the daily tier: one
