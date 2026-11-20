@@ -120,6 +120,14 @@ def describe_changes(old: dict[str, float], new: dict[str, float],
             f"Efficiency model (KenPom-style): the score moves {em:.0%} of the way to its margin "
             f"and {et:.0%} of the way to its total"
         )
+    pc = per_unit(corr.total, "pace")
+    if abs(pc) >= 0.1:
+        learned.append(f"Pace: each extra expected possession moves the total {pc:+.1f} pts")
+    sd = per_unit(corr.margin, "sos_diff")
+    if abs(sd) >= 0.05:
+        learned.append(
+            f"Strength of schedule: each point of schedule-strength edge moves the margin {sd:+.2f} pts"
+        )
     es = per_unit(corr.total, "early_season")
     if abs(es) >= 1.0:
         learned.append(f"Early-season totals adjusted {es:+.1f} pts at the season's start")
