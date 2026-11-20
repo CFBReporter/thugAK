@@ -68,6 +68,11 @@ class Ratings:
     adj_t: dict[str, float] = field(default_factory=dict)
     games: dict[str, int] = field(default_factory=dict)
     n_games: int = 0
+    # Strength of schedule: the average net rating (AdjO - AdjD) of the
+    # opponents a team has played, in points per 100 possessions.
+    sos: dict[str, float] = field(default_factory=dict)
+    # National ranks (1 = fastest pace / toughest schedule / best unit).
+    ranks: dict[str, dict[str, int]] = field(default_factory=dict)
 
     def has(self, team: str) -> bool:
         return team in self.adj_o
@@ -86,10 +91,22 @@ class Ratings:
         return {
             "home_points": round(hp, 2), "away_points": round(ap, 2),
             "possessions": round(poss, 1),
-            "home": {"adj_o": round(ho, 1), "adj_d": round(hd, 1), "adj_t": round(ht, 1),
-                     "games": self.games.get(home, 0)},
-            "away": {"adj_o": round(ao, 1), "adj_d": round(ad, 1), "adj_t": round(at, 1),
-                     "games": self.games.get(away, 0)},
+            "home": self.profile(home),
+            "away": self.profile(away),
+            "avg_tempo": round(self.avg_tempo, 1),
+        }
+
+    def profile(self, team: str) -> dict[str, Any]:
+        """One team's ratings with national ranks, for display."""
+        o = self.adj_o.get(team, self.avg_eff)
+        d = self.adj_d.get(team, self.avg_eff)
+        return {
+            "adj_o": round(o, 1), "adj_d": round(d, 1), "net": round(o - d, 1),
+            "adj_t": round(self.adj_t.get(team, self.avg_tempo), 1),
+            "sos": round(self.sos.get(team, 0.0), 1),
+            "games": self.games.get(team, 0),
+            "ranks": self.ranks.get(team, {}),
+            "of": len(self.ranks),
         }
 
 
@@ -154,6 +171,27 @@ def _solve(rows: list[Any], season: int, cutoff: str, prior: "Ratings | None") -
         if delta < 1e-4:
             break
     r.adj_o, r.adj_d, r.adj_t = o, d, tt
+
+    # Strength of schedule, from the converged ratings: the mean net rating
+    # of each team's opponents (every meeting counts, unweighted).
+    opp_net: dict[str, list[float]] = {t: [] for t in teams}
+    for home, away, *_ in obs:
+        opp_net[home].append(o[away] - d[away])
+        opp_net[away].append(o[home] - d[home])
+    r.sos = {t: sum(v) / len(v) for t, v in opp_net.items() if v}
+
+    def rank(values: dict[str, float], *, high_first: bool = True) -> dict[str, int]:
+        order = sorted(values, key=lambda t: -values[t] if high_first else values[t])
+        return {t: i + 1 for i, t in enumerate(order)}
+
+    ranked = [t for t in teams if r.games.get(t, 0) > 0]
+    r_o = rank({t: o[t] for t in ranked})
+    r_d = rank({t: d[t] for t in ranked}, high_first=False)
+    r_n = rank({t: o[t] - d[t] for t in ranked})
+    r_t = rank({t: tt[t] for t in ranked})
+    r_s = rank({t: r.sos.get(t, 0.0) for t in ranked})
+    r.ranks = {t: {"off": r_o[t], "def": r_d[t], "net": r_n[t], "pace": r_t[t], "sos": r_s[t]}
+               for t in ranked}
     return r
 
 

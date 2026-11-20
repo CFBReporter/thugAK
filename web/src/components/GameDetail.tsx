@@ -109,6 +109,11 @@ export function GameDetail({
             </div>
           </Card>
 
+          {/* ---- team ratings (college basketball) ---- */}
+          {data.efficiency_model ? (
+            <TeamRatings e={data.efficiency_model} away={game.away_name} home={game.home_name} />
+          ) : null}
+
           {/* ---- the call ---- */}
           <Card className={`call ${data.best_bet ? '' : 'none'}`}>
             <div className="call-h">
@@ -376,5 +381,67 @@ function EfficiencyRow({
         </details>
       </span>
     </div>
+  )
+}
+
+
+/** Each team's pace, strength of schedule and efficiency, with national ranks. */
+function TeamRatings({
+  e,
+  away,
+  home,
+}: {
+  e: import('../types').EfficiencyModel
+  away: string
+  home: string
+}) {
+  type T = import('../types').EfficiencyTeam
+  const rank = (t: T, k: keyof T['ranks']) => (t.ranks?.[k] ? `#${t.ranks[k]}` : '')
+  const signed = (x: number) => (x > 0 ? `+${x.toFixed(1)}` : x.toFixed(1))
+  const rows: { label: string; hint: string; v: (t: T) => string; k: keyof T['ranks'] }[] = [
+    { label: 'Pace', hint: 'possessions per game, adjusted for opponents', v: (t) => t.adj_t.toFixed(1), k: 'pace' },
+    { label: 'Strength of schedule', hint: 'average net rating of opponents faced', v: (t) => signed(t.sos), k: 'sos' },
+    { label: 'Offense', hint: 'points per 100 possessions vs an average defense', v: (t) => t.adj_o.toFixed(1), k: 'off' },
+    { label: 'Defense', hint: 'points allowed per 100 possessions (lower is better)', v: (t) => t.adj_d.toFixed(1), k: 'def' },
+    { label: 'Net', hint: 'offense minus defense', v: (t) => signed(t.net), k: 'net' },
+  ]
+  const diff = e.possessions - e.avg_tempo
+  return (
+    <Card title="Team ratings">
+      <p className="tr-pace">
+        Expected pace: <b>{e.possessions.toFixed(0)} possessions</b> (
+        {Math.abs(diff) < 0.5
+          ? 'about average'
+          : `${Math.abs(diff).toFixed(1)} ${diff > 0 ? 'faster' : 'slower'} than the average game`}
+        ). Faster games mean more scoring chances, which feeds the predicted total.
+      </p>
+      <table className="tr-table">
+        <thead>
+          <tr>
+            <th />
+            <th>{away}</th>
+            <th>{home}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.label} title={r.hint}>
+              <td>{r.label}</td>
+              <td>
+                {r.v(e.away)} <span className="tr-rank">{rank(e.away, r.k)}</span>
+              </td>
+              <td>
+                {r.v(e.home)} <span className="tr-rank">{rank(e.home, r.k)}</span>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="tr-note">
+        Ranks out of {e.home.of} Division I teams with games this season. Computed by this app
+        from each game&apos;s possessions, adjusted for opponents; #1 is the fastest pace, the
+        toughest schedule, or the best unit.
+      </div>
+    </Card>
   )
 }

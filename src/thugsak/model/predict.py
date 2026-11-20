@@ -369,6 +369,8 @@ def predict_game(
         neutral=neutral,
         efficiency_margin=(eff["home_points"] - eff["away_points"]) if eff else None,
         efficiency_total=(eff["home_points"] + eff["away_points"]) if eff else None,
+        pace=(eff["possessions"] - eff["avg_tempo"]) if eff else None,
+        sos_diff=(eff["home"]["sos"] - eff["away"]["sos"]) if eff else None,
     )
     run = store.active_model_run(conn, league) if model == "active" else model
     corr = None

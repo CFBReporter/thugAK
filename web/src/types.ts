@@ -70,8 +70,14 @@ export interface PricesResponse {
 export interface EfficiencyTeam {
   adj_o: number
   adj_d: number
+  net: number
   adj_t: number
+  /** Average net rating of opponents faced (points per 100 possessions). */
+  sos: number
   games: number
+  ranks: { off?: number; def?: number; net?: number; pace?: number; sos?: number }
+  /** How many teams the ranks are out of. */
+  of: number
 }
 
 export interface EfficiencyModel {
@@ -81,6 +87,8 @@ export interface EfficiencyModel {
   home: EfficiencyTeam
   away: EfficiencyTeam
   ratings_games: number
+  /** League-average possessions per game, for comparing this game's pace. */
+  avg_tempo: number
 }
 
 export interface LineMove {

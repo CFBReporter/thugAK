@@ -43,6 +43,10 @@ FEATURES: tuple[str, ...] = (
     # efficiency model (model/efficiency.py) sits from the engine.
     "eff_margin_gap",
     "eff_total_gap",
+    # College basketball only: expected pace (projected possessions minus
+    # the league average) and the strength-of-schedule gap (home - away).
+    "pace",
+    "sos_diff",
 )
 # The inputs of models saved before the efficiency gaps existed. A saved
 # model records its own list, so older versions keep working unchanged.
@@ -59,6 +63,8 @@ LABELS: dict[str, str] = {
     "neutral": "Neutral site",
     "eff_margin_gap": "Efficiency model (KenPom-style) disagrees",
     "eff_total_gap": "Efficiency model (KenPom-style) disagrees",
+    "pace": "Pace (expected possessions)",
+    "sos_diff": "Strength of schedule",
 }
 # Which inputs each target may use. The margin is about who is better and who
 # is tired; the total is about the scoring level and pace. Letting the margin
@@ -66,18 +72,18 @@ LABELS: dict[str, str] = {
 # on NBA replay it moved margins 3 points per standard step of total.
 MARGIN_FEATURES = frozenset({
     "base_margin", "rating_gap", "early_season", "rest_home", "rest_away",
-    "b2b_home", "b2b_away", "neutral", "eff_margin_gap",
+    "b2b_home", "b2b_away", "neutral", "eff_margin_gap", "sos_diff",
 })
 TOTAL_FEATURES = frozenset({
     "base_total", "early_season", "rest_home", "rest_away", "b2b_home", "b2b_away",
-    "eff_total_gap",
+    "eff_total_gap", "pace",
 })
 MARKET_WEIGHT_CAP = 0.15
 # The display zero for each input (None = the league average). See adjust().
 REFERENCE: dict[str, float | None] = {
     "base_margin": 0.0, "base_total": None, "rating_gap": 0.0, "early_season": 0.0,
     "rest_home": None, "rest_away": None, "b2b_home": 0.0, "b2b_away": 0.0, "neutral": 0.0,
-    "eff_margin_gap": 0.0, "eff_total_gap": 0.0,
+    "eff_margin_gap": 0.0, "eff_total_gap": 0.0, "pace": 0.0, "sos_diff": 0.0,
 }
 REST_CAP_DAYS = 7.0
 LAMBDAS = (1.0, 10.0, 100.0, 1000.0)
@@ -93,6 +99,7 @@ def features(
     games_home: int, games_away: int, rest_home: float | None,
     rest_away: float | None, neutral: bool,
     efficiency_margin: float | None = None, efficiency_total: float | None = None,
+    pace: float | None = None, sos_diff: float | None = None,
 ) -> dict[str, float]:
     """The inputs the correction sees, computed identically live and in replay."""
     def rest(d: float | None) -> float:
@@ -111,6 +118,8 @@ def features(
         "neutral": 1.0 if neutral else 0.0,
         "eff_margin_gap": float(efficiency_margin - base_margin) if efficiency_margin is not None else 0.0,
         "eff_total_gap": float(efficiency_total - base_total) if efficiency_total is not None else 0.0,
+        "pace": float(pace) if pace is not None else 0.0,
+        "sos_diff": float(sos_diff) if sos_diff is not None else 0.0,
     }
 
 

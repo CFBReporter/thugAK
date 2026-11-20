@@ -90,3 +90,15 @@ def test_models_saved_before_the_efficiency_inputs_still_work():
                             efficiency_margin=6.0, efficiency_total=150.0)
     dm, dt, _ = c.adjust(x)
     assert dm == pytest.approx(1.0 + 0.5 * 2.0) and dt == pytest.approx(-2.0)
+
+
+def test_strength_of_schedule_and_pace_ranks(db):
+    with store.connect(db) as conn:
+        r = efficiency.ratings_as_of(conn, L, 2027, "2026-12-30T00:00:00+00:00")
+    # Everyone plays the other three, so the weakest team faced the strongest
+    # schedule and the best team the weakest one.
+    assert r.sos["ncaamb:D"] > r.sos["ncaamb:A"]
+    assert r.ranks["ncaamb:D"]["sos"] == 1 and r.ranks["ncaamb:A"]["sos"] == 4
+    assert r.ranks["ncaamb:A"]["pace"] == 1 and r.ranks["ncaamb:A"]["net"] == 1
+    prof = r.profile("ncaamb:A")
+    assert prof["of"] == 4 and prof["net"] == round(prof["adj_o"] - prof["adj_d"], 1)
