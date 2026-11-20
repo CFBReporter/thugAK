@@ -32,6 +32,8 @@ export interface GameRow {
   home_win_price: number | null
   away_win_price: number | null
   has_ladders: boolean
+  /** How many sportsbook lines moved significantly since first seen. */
+  line_moves?: number
 }
 
 export interface GamesResponse {
@@ -79,6 +81,18 @@ export interface EfficiencyModel {
   home: EfficiencyTeam
   away: EfficiencyTeam
   ratings_games: number
+}
+
+export interface LineMove {
+  sportsbook: string
+  market: 'moneyline' | 'spread' | 'total'
+  selection: string
+  start: string
+  end: string
+  change: string
+  note: string
+  first_seen_at: string
+  last_seen_at: string
 }
 
 /** A recommended bet that loses if the predicted score holds. */
@@ -178,6 +192,8 @@ export interface RecommendationResponse {
   prediction_cautions: string[]
 
   the_call: string
+  /** Sportsbook lines that moved far from where they were first seen. */
+  line_moves?: LineMove[]
   /** College basketball: the tempo-free (KenPom-style) efficiency projection. */
   efficiency_model?: EfficiencyModel | null
   /** Value bets against the predicted outcome, kept out of the call. */

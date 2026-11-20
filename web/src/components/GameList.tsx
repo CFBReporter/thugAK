@@ -65,6 +65,11 @@ function Row({ game, onPick }: { game: GameRow; onPick: (g: GameRow) => void }) 
           </div>
         </div>
 
+        {game.line_moves ? (
+          <span className="badge small" title="A sportsbook line moved significantly since first seen">
+            line moved
+          </span>
+        ) : null}
         <div className="vol">
           {game.kalshi_markets > 0 ? `${game.kalshi_markets} mkts` : 'no book'}
         </div>

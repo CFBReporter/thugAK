@@ -468,6 +468,11 @@ async def list_games(
             else:
                 priced = {"source": "none"}
             by_id = priced.get("prices") or {}
+            from ..analysis import line_moves as moves_mod  # noqa: PLC0415
+
+            hist: dict[str, list[Any]] = {}
+            for h in store.line_history(conn, [r["game_id"] for r in rows]):
+                hist.setdefault(h["game_id"], []).append(h)
 
             out = []
             for r in rows:
@@ -491,6 +496,12 @@ async def list_games(
                             -r["close_spread"] if r["close_spread"] is not None else None
                         ),
                         "book_total": r["close_total"],
+                        # How many book lines moved significantly (badge).
+                        "line_moves": len(moves_mod.significant(
+                            hist.get(r["game_id"], []),
+                            store.team_label(conn, r["home_team"], short=True),
+                            store.team_label(conn, r["away_team"], short=True),
+                        )) if r["game_id"] in hist else 0,
                         **(by_id.get(r["game_id"]) or _no_prices()),
                     }
                 )
@@ -1398,8 +1409,14 @@ async def get_recommendation(
 
     from ..model import report as report_mod  # noqa: PLC0415
 
+    from ..analysis import line_moves as moves_mod  # noqa: PLC0415
+
     with store.connect(db, readonly=True) as _rc:
         model_badge = report_mod.badge_conn(_rc, league)
+        line_moves = moves_mod.significant(
+            store.line_history(_rc, [game_id]),
+            store.team_label(_rc, pred.home_team), store.team_label(_rc, pred.away_team),
+        )
     return {
         "game_id": game_id,
         "league": league,
@@ -1433,6 +1450,9 @@ async def get_recommendation(
         "based_on": outlook.based_on,
         "versus_the_sportsbook": outlook.market_check or None,
         "prediction_cautions": outlook.cautions,
+
+        # Lines that moved far from where they were first seen, per book.
+        "line_moves": line_moves,
 
         # College basketball: the tempo-free efficiency (KenPom-style)
         # projection, shown as a second opinion beside the model's score.

@@ -112,7 +112,7 @@ async def save_sharpapi_lines(league: str, dates: list[str], *, db: str) -> dict
     if league not in sharpapi.LEAGUES:
         return {"skipped": "league not covered"}
     now = datetime.now(timezone.utc)
-    got = matched = written = 0
+    got = matched = written = tracked = 0
     unmatched: list[str] = []
     books: set[str] = set()
     async with cache_mod.make_client() as client:
@@ -157,15 +157,27 @@ async def save_sharpapi_lines(league: str, dates: list[str], *, db: str) -> dict
                         continue
                     # Their home team should be ours; if the pair matched the
                     # other way round, flip the spread to our home side.
+                    flipped = h != g["home_team"]
                     spread = ln["spread"]
-                    if spread is not None and h != g["home_team"]:
+                    if spread is not None and flipped:
                         spread = -spread
-                    store.update_market_line(conn, g["game_id"], spread=spread, total=ln["total"],
-                                             overwrite=True)
-                    written += 1
+                    if spread is not None or ln["total"] is not None:
+                        store.update_market_line(conn, g["game_id"], spread=spread,
+                                                 total=ln["total"], overwrite=True)
+                        written += 1
+                    # Every book's own quote, for line-movement tracking.
+                    quotes = []
+                    for book, market, side, line, odds in ln.get("quotes", []):
+                        if flipped and market == "moneyline":
+                            side = "away" if side == "home" else "home"
+                        elif flipped and market == "spread":
+                            line = -line if line is not None else None
+                        quotes.append((g["game_id"], book, market, side, line, odds))
+                    tracked += store.record_lines(conn, quotes, seen_at=store.utcnow())
                     books.update(ln["books"])
             conn.commit()
     return {"source": "sharpapi", "lines": got, "matched": matched, "written": written,
+            "quotes_tracked": tracked,
             "unmatched": len(unmatched), "unmatched_sample": unmatched[:3], "books": sorted(books)}
 
 

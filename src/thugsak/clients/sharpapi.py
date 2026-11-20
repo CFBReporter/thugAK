@@ -93,7 +93,7 @@ async def _odds_rows(client: Any, league: str) -> tuple[list[dict[str, Any]], di
     rows: list[dict[str, Any]] = []
     meta: dict[str, Any] = {}
     params: dict[str, Any] = {
-        "league": LEAGUES[league], "market": "point_spread,total_points",
+        "league": LEAGUES[league], "market": "moneyline,point_spread,total_points",
         "is_main_line": "true", "is_live": "false", "limit": PAGE,
     }
     for _ in range(MAX_PAGES):
@@ -108,31 +108,47 @@ async def _odds_rows(client: Any, league: str) -> tuple[list[dict[str, Any]], di
 
 
 def combine(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """One line per event: median home spread and median total across books."""
+    """One line per event: median home spread and median total across books,
+    plus every book's own quotes (`quotes`: book, market, side, line, odds)
+    for line-movement tracking."""
     events: dict[str, dict[str, Any]] = {}
     for r in rows:
-        if r.get("is_live") or r.get("is_active") is False or r.get("line") is None:
+        if r.get("is_live") or r.get("is_active") is False:
             continue
         ev = events.setdefault(r.get("event_uuid") or r["event_id"], {
             "home_team": r["home_team"], "away_team": r["away_team"],
-            "start_time": r.get("event_start_time"), "spreads": {}, "totals": {},
+            "start_time": r.get("event_start_time"), "spreads": {}, "totals": {}, "quotes": [],
         })
         book = r.get("sportsbook", "?")
         mt = r.get("market_type", "")
         side = (r.get("selection_type") or "").lower()
-        if mt == "point_spread" and (side == "home" or r.get("selection") == r["home_team"]):
+        sel = str(r.get("selection", ""))
+        odds = r.get("odds_american")
+        odds = float(odds) if odds is not None else None
+        if mt == "moneyline" and odds is not None:
+            s = side if side in ("home", "away") else (
+                "home" if sel == r["home_team"] else "away" if sel == r["away_team"] else "")
+            if s:
+                ev["quotes"].append((book, "moneyline", s, None, odds))
+            continue
+        if r.get("line") is None:
+            continue
+        if mt == "point_spread" and (side == "home" or sel == r["home_team"]):
             ev["spreads"][book] = float(r["line"])
-        elif mt == "total_points" and (side == "over" or str(r.get("selection", "")).lower() == "over"):
+            ev["quotes"].append((book, "spread", "home", float(r["line"]), odds))
+        elif mt == "total_points" and (side == "over" or sel.lower() == "over"):
             ev["totals"][book] = float(r["line"])
+            ev["quotes"].append((book, "total", "over", float(r["line"]), odds))
     out = []
     for ev in events.values():
-        if not ev["spreads"] and not ev["totals"]:
+        if not ev["spreads"] and not ev["totals"] and not ev["quotes"]:
             continue
         out.append({
             "home_team": ev["home_team"], "away_team": ev["away_team"], "start_time": ev["start_time"],
             "spread": statistics.median(ev["spreads"].values()) if ev["spreads"] else None,
             "total": statistics.median(ev["totals"].values()) if ev["totals"] else None,
             "books": sorted(set(ev["spreads"]) | set(ev["totals"])),
+            "quotes": ev["quotes"],
         })
     return out
 

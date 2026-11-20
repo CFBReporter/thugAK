@@ -150,6 +150,39 @@ export function GameDetail({
             </Card>
           ) : null}
 
+          {/* ---- line movement ---- */}
+          {data.line_moves && data.line_moves.length ? (
+            <Card title="Line movement" className="moves">
+              <p className="mv-intro">
+                Lines that moved a lot since this app first saw them. Big moves usually mean news
+                (injuries, lineups) or heavy money on one side.
+              </p>
+              {data.line_moves.map((m) => (
+                <div key={`${m.sportsbook}-${m.market}-${m.selection}`} className="mv-row">
+                  <div className="mv-h">
+                    <span className="mv-what">
+                      {m.selection} {m.market === 'total' ? '' : m.market}
+                    </span>
+                    <span className="mv-book">{m.sportsbook}</span>
+                  </div>
+                  <div className="mv-nums">
+                    <span>{m.start}</span>
+                    <span className="mv-arrow">&rarr;</span>
+                    <span className="mv-end">{m.end}</span>
+                    <span className="mv-change">{m.change}</span>
+                  </div>
+                  <div className="mv-when">
+                    first seen{' '}
+                    {new Date(m.first_seen_at).toLocaleString('en-US', {
+                      weekday: 'short', hour: 'numeric', minute: '2-digit', timeZone: 'America/Chicago',
+                    })}{' '}
+                    CT
+                  </div>
+                </div>
+              ))}
+            </Card>
+          ) : null}
+
           {/* ---- money ---- */}
           <Card title={`Kalshi money -- ${data.kalshi_money.markets_counted} markets`}>
             <MoneyBar

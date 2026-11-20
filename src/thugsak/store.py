@@ -261,6 +261,22 @@ CREATE TABLE IF NOT EXISTS model_runs (
     note        TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_model_runs_league ON model_runs(league, trained_at);
+
+-- Line movement (see migrations/postgres/0004_line_history.sql).
+CREATE TABLE IF NOT EXISTS line_history (
+    game_id     TEXT NOT NULL,
+    sportsbook  TEXT NOT NULL,
+    market      TEXT NOT NULL,
+    side        TEXT NOT NULL,
+    open_line   REAL,
+    open_odds   REAL,
+    open_at     TEXT NOT NULL,
+    last_line   REAL,
+    last_odds   REAL,
+    last_at     TEXT NOT NULL,
+    PRIMARY KEY (game_id, sportsbook, market, side)
+);
+CREATE INDEX IF NOT EXISTS ix_line_history_game ON line_history(game_id);
 """
 
 
@@ -1896,3 +1912,41 @@ def set_possessions(conn: Any, pairs: Sequence[tuple[str, float]]) -> int:
         [(float(p), gid) for gid, p in pairs],
     )
     return len(pairs)
+
+
+# --------------------------------------------------------------------------
+# line movement
+# --------------------------------------------------------------------------
+
+def record_lines(conn: Any, rows: Sequence[tuple[str, str, str, str, float | None, float | None]],
+                 *, seen_at: str | None = None) -> int:
+    """Record (game_id, sportsbook, market, side, line, odds) observations.
+
+    The first observation of a row is kept as its opening; later ones only
+    move `last_*`. Rows with neither a line nor odds are skipped.
+    """
+    at = seen_at or utcnow()
+    vals = [(g, b, m, sd, ln, od, at, ln, od, at) for g, b, m, sd, ln, od in rows
+            if ln is not None or od is not None]
+    if not vals:
+        return 0
+    conn.executemany(
+        """INSERT INTO line_history (game_id, sportsbook, market, side,
+                                     open_line, open_odds, open_at, last_line, last_odds, last_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT (game_id, sportsbook, market, side) DO UPDATE SET
+             last_line = excluded.last_line,
+             last_odds = excluded.last_odds,
+             last_at   = excluded.last_at""",
+        vals,
+    )
+    return len(vals)
+
+
+def line_history(conn: Any, game_ids: Sequence[str]) -> list[Any]:
+    if not game_ids:
+        return []
+    marks = ",".join("?" * len(game_ids))
+    return conn.execute(
+        f"SELECT * FROM line_history WHERE game_id IN ({marks})", list(game_ids)
+    ).fetchall()
