@@ -42,3 +42,12 @@ def test_live_and_suspended_rows_are_ignored():
 def test_no_key_means_not_available(monkeypatch):
     monkeypatch.delenv(sharpapi.ENV_VAR, raising=False)
     assert not sharpapi.available()
+
+
+def test_a_two_line_secret_is_reported_plainly_without_the_value(monkeypatch):
+    import pytest
+
+    monkeypatch.setenv(sharpapi.ENV_VAR, "abc123\n  label")
+    with pytest.raises(sharpapi.SharpApiError) as e:
+        sharpapi.api_key()
+    assert "line break" in str(e.value) and "abc123" not in str(e.value)

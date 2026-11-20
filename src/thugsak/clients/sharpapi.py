@@ -19,6 +19,10 @@ import os
 import statistics
 from typing import Any
 
+class SharpApiError(RuntimeError):
+    pass
+
+
 BASE = "https://api.sharpapi.io/api/v1"
 ENV_VAR = "SHARPAPI_KEY"
 LEAGUES = {"nfl": "nfl", "nba": "nba", "ncaaf": "ncaaf", "ncaamb": "ncaab"}
@@ -27,15 +31,19 @@ MAX_OFFSET = 500   # the API refuses larger offsets on /odds
 
 
 def api_key() -> str:
-    return os.environ.get(ENV_VAR, "").strip()
+    key = os.environ.get(ENV_VAR, "").strip()
+    if any(c.isspace() for c in key):
+        # A pasted secret with two lines (key plus a label, or the key twice)
+        # fails deep in the HTTP layer with an unreadable error. Say what is
+        # wrong instead -- without ever printing the value.
+        raise SharpApiError(
+            f"{ENV_VAR} contains a line break or space; re-save the secret with only the key"
+        )
+    return key
 
 
 def available() -> bool:
-    return bool(api_key())
-
-
-class SharpApiError(RuntimeError):
-    pass
+    return bool(os.environ.get(ENV_VAR, "").strip())
 
 
 async def _odds_rows(client: Any, league: str, date: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
