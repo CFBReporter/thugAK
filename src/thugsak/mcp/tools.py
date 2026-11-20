@@ -1434,6 +1434,10 @@ async def get_recommendation(
         "versus_the_sportsbook": outlook.market_check or None,
         "prediction_cautions": outlook.cautions,
 
+        # College basketball: the tempo-free efficiency (KenPom-style)
+        # projection, shown as a second opinion beside the model's score.
+        "efficiency_model": pred.efficiency,
+
         # Which model made this, and how it got from the engine's score to
         # the one shown: the readable steps of the learned layer.
         "model": {

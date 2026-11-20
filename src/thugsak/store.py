@@ -335,6 +335,8 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("predictions", "bets", "TEXT"),
     ("predictions", "the_call", "TEXT"),
     ("predictions", "kalshi_money_usd", "REAL"),
+    # Efficiency model (model/efficiency.py); see migrations 0003.
+    ("games", "possessions", "REAL"),
 )
 
 
@@ -1883,3 +1885,14 @@ def model_runs(conn: Any, league: str | None = None, *, limit: int = 100) -> lis
     q += " ORDER BY trained_at DESC, run_id DESC LIMIT ?"
     args.append(limit)
     return [_decode_run(r) for r in conn.execute(q, args).fetchall()]
+
+
+def set_possessions(conn: Any, pairs: Sequence[tuple[str, float]]) -> int:
+    """Record possession counts: (game_id, possessions) pairs."""
+    if not pairs:
+        return 0
+    conn.executemany(
+        "UPDATE games SET possessions=? WHERE game_id=?",
+        [(float(p), gid) for gid, p in pairs],
+    )
+    return len(pairs)

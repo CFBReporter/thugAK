@@ -347,6 +347,14 @@ function HowItWorks() {
               with and without each player. For college, where injury reports are unreliable,
               which regulars have stopped appearing in box scores.
             </li>
+            <li>
+              <b>College basketball only: an efficiency model in the KenPom style.</b> Every team
+              gets an offence and defence rating in points per 100 possessions, plus a tempo,
+              each adjusted for the opponents it has faced. A game&apos;s projected score is its
+              expected possessions times those ratings. It is computed here from each game&apos;s
+              possession count, not taken from KenPom, and it enters the model as an input whose
+              weight is learned each week.
+            </li>
           </ul>
         </section>
 

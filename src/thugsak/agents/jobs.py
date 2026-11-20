@@ -214,6 +214,11 @@ async def _league(league: str, date: str, *, daily: bool, db: str) -> dict[str, 
                 failed.append(gid)
         out["record"] = {"recorded": recorded, "failed": failed}
 
+    if daily and league == "ncaamb":
+        # Possession counts for the efficiency model, before the next slate.
+        with step("possessions"):
+            out["possessions"] = await ingest_tools.ingest_possessions(league, db=db)
+
     if daily:
         with step("player_logs"):
             pl = await ingest_tools.ingest_player_logs(league, scope["on_slate"], db=db) if scope["on_slate"] else {}

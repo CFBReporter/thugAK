@@ -153,6 +153,7 @@ SKED_DATE = 1
 SKED_MATCHUP = 3
 SKED_PREDICTION = 4      # deliberately unused
 SKED_RESULT = 24
+SKED_POSSESSIONS = 25    # the game's possession count (e.g. 72.775)
 
 # "71 Notre Dame vs. 32 Villanova" / "287 Lindenwood at 59 TCU"
 _MATCHUP = re.compile(
@@ -218,6 +219,7 @@ def _parse_sked_row(row: list[str], year: int) -> dict[str, Any] | None:
         "away_name": away,
         "home_score": hs,
         "away_score": as_,
+        "possessions": _f(row, SKED_POSSESSIONS),
     }
 
 

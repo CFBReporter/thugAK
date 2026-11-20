@@ -33,7 +33,7 @@ from typing import Any, Sequence
 
 from .. import store
 from ..config import league as get_league
-from . import asof, correction as correction_mod, gamelog, injuries as injuries_mod, ratings as ratings_mod
+from . import asof, correction as correction_mod, efficiency as efficiency_mod, gamelog, injuries as injuries_mod, ratings as ratings_mod
 
 MODEL_VERSION = "v1"
 
@@ -120,6 +120,8 @@ class Prediction:
     base_away_points: float | None = None
     adjustments: list[dict[str, Any]] = field(default_factory=list)
     features: dict[str, float] = field(default_factory=dict)
+    # College basketball: the tempo-free efficiency (KenPom-style) projection.
+    efficiency: dict[str, Any] | None = None
 
     @property
     def spread(self) -> float | None:
@@ -347,6 +349,15 @@ def predict_game(
             return None
         return (asof.parse_ts(as_of) - asof.parse_ts(last[0]["start_time"])).total_seconds() / 86400.0
 
+    eff = None
+    if league in efficiency_mod.LEAGUES and season is not None:
+        er = efficiency_mod.ratings_as_of(conn, league, int(season), as_of)
+        if er is not None and er.has(home) and er.has(away):
+            eff = er.project(home, away, neutral=neutral)
+            if eff:
+                eff["ratings_games"] = er.n_games
+    pred.efficiency = eff
+
     pred.features = correction_mod.features(
         base_margin=home_pts - away_pts,
         base_total=home_pts + away_pts,
@@ -356,6 +367,8 @@ def predict_game(
         rest_home=_rest(home),
         rest_away=_rest(away),
         neutral=neutral,
+        efficiency_margin=(eff["home_points"] - eff["away_points"]) if eff else None,
+        efficiency_total=(eff["home_points"] + eff["away_points"]) if eff else None,
     )
     run = store.active_model_run(conn, league) if model == "active" else model
     corr = None
@@ -460,6 +473,17 @@ def predict_game(
                 total=market_total,
                 home_win_prob=market_home_prob,
                 source="sportsbook via ESPN",
+            )
+        )
+    if pred.efficiency:
+        em = pred.efficiency["home_points"] - pred.efficiency["away_points"]
+        pred.anchors.append(
+            Anchor(
+                name="efficiency",
+                spread=round(em, 2),
+                total=round(pred.efficiency["home_points"] + pred.efficiency["away_points"], 2),
+                home_win_prob=win_probability(em, pred.sigma_margin),
+                source=f"tempo-free adjusted efficiency, {pred.efficiency['ratings_games']} games",
             )
         )
     if espn_predictor_prob is not None:

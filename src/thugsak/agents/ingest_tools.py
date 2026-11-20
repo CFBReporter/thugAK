@@ -513,6 +513,74 @@ async def link_team_alias(
     }
 
 
+async def ingest_possessions(
+    league: str = "ncaamb", *, seasons: list[int] | None = None, db: str = str(DB_PATH),
+) -> dict[str, Any]:
+    """Fill `games.possessions` from Barttorvik's season file (college
+    basketball only). One download per season; matched to stored games in
+    memory by team pair and date (+-1 day, either home/away order, since
+    neutral-site listings vary). Only games still missing a count are written.
+    """
+    from datetime import date as _date, timedelta as _td  # noqa: PLC0415
+
+    from ..clients.stats import barttorvik  # noqa: PLC0415
+
+    if league != "ncaamb":
+        return {"league": league, "unsupported": True}
+    store.init_db(db)
+    out: dict[str, Any] = {"league": league, "seasons": {}}
+    async with cache.make_client() as client:
+        with store.connect(db) as conn:
+            if not seasons:
+                rows = conn.execute(
+                    "SELECT DISTINCT season FROM games WHERE league=? ORDER BY season DESC LIMIT 3",
+                    (league,),
+                ).fetchall()
+                seasons = sorted(int(r["season"]) for r in rows)
+            for season in seasons:
+                stored = conn.execute(
+                    "SELECT game_id, home_team, away_team, start_time, slate_date, possessions "
+                    "FROM games WHERE league=? AND season=? AND completed=1",
+                    (league, season),
+                ).fetchall()
+                index: dict[tuple[str, frozenset[str]], Any] = {}
+                for g in stored:
+                    d = (g["slate_date"] or g["start_time"])[:10]
+                    index[(d, frozenset((g["home_team"], g["away_team"])))] = g
+                try:
+                    sked = await barttorvik.Barttorvik().games(client, league, year=season)
+                except Exception as e:
+                    out["seasons"][season] = {"error": f"{type(e).__name__}: {e}"}
+                    continue
+                todo: list[tuple[str, float]] = []
+                matched = unmatched = 0
+                for r in sked:
+                    poss = r.get("possessions")
+                    if not poss or poss <= 0:
+                        continue
+                    h = matching.resolve_team(conn, league, r["home_name"])
+                    a = matching.resolve_team(conn, league, r["away_name"])
+                    if not h or not a or h == a:
+                        unmatched += 1
+                        continue
+                    d0 = _date.fromisoformat(r["start_time"][:10])
+                    g = None
+                    for off in (0, 1, -1):
+                        g = index.get(((d0 + _td(days=off)).isoformat(), frozenset((h, a))))
+                        if g is not None:
+                            break
+                    if g is None:
+                        unmatched += 1
+                        continue
+                    matched += 1
+                    if g["possessions"] is None or abs(float(g["possessions"]) - poss) > 0.01:
+                        todo.append((g["game_id"], poss))
+                written = store.set_possessions(conn, todo)
+                conn.commit()
+                out["seasons"][season] = {"matched": matched, "unmatched": unmatched, "written": written}
+    return out
+
+
 async def run_retention(
     league: str, *, keep: int = 7, trim_cache: bool = True, db: str = str(DB_PATH)
 ) -> dict[str, Any]:

@@ -39,7 +39,14 @@ FEATURES: tuple[str, ...] = (
     "b2b_home",
     "b2b_away",
     "neutral",
+    # College basketball only (0 elsewhere): how far the tempo-free
+    # efficiency model (model/efficiency.py) sits from the engine.
+    "eff_margin_gap",
+    "eff_total_gap",
 )
+# The inputs of models saved before the efficiency gaps existed. A saved
+# model records its own list, so older versions keep working unchanged.
+LEGACY_FEATURES: tuple[str, ...] = FEATURES[:9]
 LABELS: dict[str, str] = {
     "base_margin": "Margin size (engine over/under-shoots)",
     "base_total": "Scoring level this season",
@@ -50,6 +57,8 @@ LABELS: dict[str, str] = {
     "b2b_home": "Back-to-back",
     "b2b_away": "Back-to-back",
     "neutral": "Neutral site",
+    "eff_margin_gap": "Efficiency model (KenPom-style) disagrees",
+    "eff_total_gap": "Efficiency model (KenPom-style) disagrees",
 }
 # Which inputs each target may use. The margin is about who is better and who
 # is tired; the total is about the scoring level and pace. Letting the margin
@@ -57,16 +66,18 @@ LABELS: dict[str, str] = {
 # on NBA replay it moved margins 3 points per standard step of total.
 MARGIN_FEATURES = frozenset({
     "base_margin", "rating_gap", "early_season", "rest_home", "rest_away",
-    "b2b_home", "b2b_away", "neutral",
+    "b2b_home", "b2b_away", "neutral", "eff_margin_gap",
 })
 TOTAL_FEATURES = frozenset({
     "base_total", "early_season", "rest_home", "rest_away", "b2b_home", "b2b_away",
+    "eff_total_gap",
 })
 MARKET_WEIGHT_CAP = 0.15
 # The display zero for each input (None = the league average). See adjust().
 REFERENCE: dict[str, float | None] = {
     "base_margin": 0.0, "base_total": None, "rating_gap": 0.0, "early_season": 0.0,
     "rest_home": None, "rest_away": None, "b2b_home": 0.0, "b2b_away": 0.0, "neutral": 0.0,
+    "eff_margin_gap": 0.0, "eff_total_gap": 0.0,
 }
 REST_CAP_DAYS = 7.0
 LAMBDAS = (1.0, 10.0, 100.0, 1000.0)
@@ -81,6 +92,7 @@ def features(
     *, base_margin: float, base_total: float, rating_margin: float | None,
     games_home: int, games_away: int, rest_home: float | None,
     rest_away: float | None, neutral: bool,
+    efficiency_margin: float | None = None, efficiency_total: float | None = None,
 ) -> dict[str, float]:
     """The inputs the correction sees, computed identically live and in replay."""
     def rest(d: float | None) -> float:
@@ -97,6 +109,8 @@ def features(
         "b2b_home": 1.0 if rh <= 1.0 else 0.0,
         "b2b_away": 1.0 if ra <= 1.0 else 0.0,
         "neutral": 1.0 if neutral else 0.0,
+        "eff_margin_gap": float(efficiency_margin - base_margin) if efficiency_margin is not None else 0.0,
+        "eff_total_gap": float(efficiency_total - base_total) if efficiency_total is not None else 0.0,
     }
 
 
@@ -108,11 +122,12 @@ class Target:
     lam: float = 0.0
     market_weight: float = 0.0
 
-    def contributions(self, x: dict[str, float], mean: Sequence[float], std: Sequence[float]) -> dict[str, float]:
+    def contributions(self, x: dict[str, float], mean: Sequence[float], std: Sequence[float],
+                      names: Sequence[str] = FEATURES) -> dict[str, float]:
         out = {}
-        for i, name in enumerate(FEATURES):
+        for i, name in enumerate(names):
             s = std[i] or 1.0
-            out[name] = self.coef[i] * (x[name] - mean[i]) / s
+            out[name] = self.coef[i] * (x.get(name, 0.0) - mean[i]) / s
         return out
 
 
@@ -125,6 +140,7 @@ class Correction:
     margin: Target
     total: Target
     n_rows: int = 0
+    features: list[str] = field(default_factory=lambda: list(FEATURES))
 
     # -- (de)serialisation --------------------------------------------------
     def to_dict(self) -> dict[str, Any]:
@@ -136,6 +152,7 @@ class Correction:
             league=d["league"], version=d["version"], mean=list(d["mean"]),
             std=list(d["std"]), margin=Target(**d["margin"]),
             total=Target(**d["total"]), n_rows=int(d.get("n_rows", 0)),
+            features=list(d.get("features") or LEGACY_FEATURES),
         )
 
     # -- applying -----------------------------------------------------------
@@ -149,21 +166,22 @@ class Correction:
         appears when a team is on one; the difference moves into
         "League-wide bias". The sum, and so the prediction, is unchanged.
         """
-        cm = self.margin.contributions(x, self.mean, self.std)
-        ct = self.total.contributions(x, self.mean, self.std)
+        names = self.features
+        cm = self.margin.contributions(x, self.mean, self.std, names)
+        ct = self.total.contributions(x, self.mean, self.std, names)
         dm = self.margin.intercept + sum(cm.values())
         dt = self.total.intercept + sum(ct.values())
-        ref = {f: (self.mean[i] if REFERENCE.get(f) is None else REFERENCE[f])
-               for i, f in enumerate(FEATURES)}
-        rm = self.margin.contributions(ref, self.mean, self.std)
-        rt = self.total.contributions(ref, self.mean, self.std)
-        cm = {f: cm[f] - rm[f] for f in FEATURES}
-        ct = {f: ct[f] - rt[f] for f in FEATURES}
+        ref = {f: (self.mean[i] if REFERENCE.get(f, 0.0) is None else REFERENCE.get(f, 0.0))
+               for i, f in enumerate(names)}
+        rm = self.margin.contributions(ref, self.mean, self.std, names)
+        rt = self.total.contributions(ref, self.mean, self.std, names)
+        cm = {f: cm[f] - rm[f] for f in names}
+        ct = {f: ct[f] - rt[f] for f in names}
         bias_m = dm - sum(cm.values())
         bias_t = dt - sum(ct.values())
 
         groups: dict[str, list[float]] = {}
-        for name in FEATURES:
+        for name in names:
             g = groups.setdefault(LABELS[name], [0.0, 0.0])
             g[0] += cm[name]
             g[1] += ct[name]
@@ -190,7 +208,7 @@ def blend_market(value: float, market: float | None, weight: float) -> float:
 # --------------------------------------------------------------------------
 
 def _matrix(rows: Sequence[dict[str, Any]]) -> np.ndarray:
-    return np.array([[r["features"][f] for f in FEATURES] for r in rows], dtype=float)
+    return np.array([[r["features"].get(f, 0.0) for f in FEATURES] for r in rows], dtype=float)
 
 
 def _ridge(X: np.ndarray, y: np.ndarray, lam: float, w: np.ndarray | None = None) -> tuple[float, np.ndarray]:

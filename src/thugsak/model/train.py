@@ -95,9 +95,11 @@ def describe_changes(old: dict[str, float], new: dict[str, float],
         learned.append(f"Totals were running {abs(ti):.1f} pts {'low' if ti > 0 else 'high'}; corrected")
     if abs(mi) >= 0.5:
         learned.append(f"Home margins were running {abs(mi):.1f} pts {'low' if mi > 0 else 'high'}; corrected")
-    idx = {f: i for i, f in enumerate(correction.FEATURES)}
+    idx = {f: i for i, f in enumerate(corr.features)}
 
     def per_unit(target: correction.Target, f: str) -> float:
+        if f not in idx:
+            return 0.0
         return target.coef[idx[f]] / (corr.std[idx[f]] or 1.0)
 
     b2b_h = per_unit(corr.margin, "b2b_home")
@@ -111,6 +113,12 @@ def describe_changes(old: dict[str, float], new: dict[str, float],
         learned.append(
             f"When power ratings disagree with recent form, the margin moves {abs(rg):.0%} "
             f"{'toward the ratings' if rg > 0 else 'away from the ratings'}"
+        )
+    em, et = per_unit(corr.margin, "eff_margin_gap"), per_unit(corr.total, "eff_total_gap")
+    if abs(em) >= 0.05 or abs(et) >= 0.05:
+        learned.append(
+            f"Efficiency model (KenPom-style): the score moves {em:.0%} of the way to its margin "
+            f"and {et:.0%} of the way to its total"
         )
     es = per_unit(corr.total, "early_season")
     if abs(es) >= 1.0:

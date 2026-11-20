@@ -65,6 +65,22 @@ export interface PricesResponse {
   unmatched_count: number
 }
 
+export interface EfficiencyTeam {
+  adj_o: number
+  adj_d: number
+  adj_t: number
+  games: number
+}
+
+export interface EfficiencyModel {
+  home_points: number
+  away_points: number
+  possessions: number
+  home: EfficiencyTeam
+  away: EfficiencyTeam
+  ratings_games: number
+}
+
 /** A recommended bet that loses if the predicted score holds. */
 export interface Longshot {
   label: string
@@ -162,6 +178,8 @@ export interface RecommendationResponse {
   prediction_cautions: string[]
 
   the_call: string
+  /** College basketball: the tempo-free (KenPom-style) efficiency projection. */
+  efficiency_model?: EfficiencyModel | null
   /** Value bets against the predicted outcome, kept out of the call. */
   longshots?: Longshot[]
   best_bet: BestBet | null

@@ -89,6 +89,9 @@ export function GameDetail({
                 <span className="k">Result</span>
                 <span className="v">{data.predicted_result}</span>
               </div>
+              {data.efficiency_model ? (
+                <EfficiencyRow e={data.efficiency_model} away={game.away_name} home={game.home_name} />
+              ) : null}
               {data.versus_the_sportsbook ? (
                 <div className="kv">
                   <span className="k">Book</span>
@@ -299,5 +302,46 @@ function ModelLine({ model }: { model: import('../types').ModelBlock }) {
         </div>
       ) : null}
     </details>
+  )
+}
+
+
+/** The KenPom-style efficiency projection: a second opinion on the score. */
+function EfficiencyRow({
+  e,
+  away,
+  home,
+}: {
+  e: import('../types').EfficiencyModel
+  away: string
+  home: string
+}) {
+  const fmt = (t: import('../types').EfficiencyTeam) =>
+    `off ${t.adj_o.toFixed(1)} · def ${t.adj_d.toFixed(1)} · tempo ${t.adj_t.toFixed(1)}`
+  return (
+    <div className="kv">
+      <span className="k">Efficiency</span>
+      <span className="v">
+        <details className="eff">
+          <summary>
+            KenPom-style: {away} {Math.round(e.away_points)} &ndash; {home}{' '}
+            {Math.round(e.home_points)} ({e.possessions.toFixed(0)} possessions)
+          </summary>
+          <div className="eff-body">
+            <div>
+              {away}: {fmt(e.away)}
+            </div>
+            <div>
+              {home}: {fmt(e.home)}
+            </div>
+            <div className="eff-note">
+              Points per 100 possessions against an average opponent (lower defence is better),
+              from {e.ratings_games} games this season with possession counts. Feeds the model
+              as an input; its weight is learned weekly.
+            </div>
+          </div>
+        </details>
+      </span>
+    </div>
   )
 }
