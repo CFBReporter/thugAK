@@ -472,7 +472,7 @@ def predict_game(
                 spread=-market_spread if market_spread is not None else None,
                 total=market_total,
                 home_win_prob=market_home_prob,
-                source="sportsbook via ESPN",
+                source="sportsbook line (SharpAPI consensus, or ESPN where SharpAPI has none)",
             )
         )
     if pred.efficiency:
