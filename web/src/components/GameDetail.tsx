@@ -438,7 +438,7 @@ function TeamRatings({
         </tbody>
       </table>
       <div className="tr-note">
-        Ranks out of {e.home.of} Division I teams with games this season. Computed by this app
+        Ranks out of {e.home.of} teams with games this season (Division I plus the lower-division teams they played). Computed by this app
         from each game&apos;s possessions, adjusted for opponents; #1 is the fastest pace, the
         toughest schedule, or the best unit.
       </div>
