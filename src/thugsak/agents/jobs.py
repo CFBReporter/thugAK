@@ -245,6 +245,11 @@ async def _league(league: str, date: str, *, daily: bool, db: str) -> dict[str, 
 
     with step("scores"):
         out["scores"] = {"dates": await gate.refresh_scores(league, date, db=db)}
+        # Tomorrow's slate too, so its games exist for the line feed and the
+        # site's "tomorrow" pages the evening before. (refresh_scores covers
+        # the day before the date it is given; today's pull is cached.)
+        nxt = (datetime.strptime(date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        out["scores"]["tomorrow"] = await gate.refresh_scores(league, nxt, db=db)
 
     with step("injuries"):
         inj = await ingest_tools.ingest_injuries(league, db=db)
