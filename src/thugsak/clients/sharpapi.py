@@ -46,34 +46,64 @@ def available() -> bool:
     return bool(os.environ.get(ENV_VAR, "").strip())
 
 
-async def _odds_rows(client: Any, league: str, date: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Main-line spread and total rows for one league and date (all pages)."""
-    rows: list[dict[str, Any]] = []
-    meta: dict[str, Any] = {}
-    offset = 0
-    while offset <= MAX_OFFSET:
+# Free tier: 12 requests a minute per key, shared by every call in a run.
+MIN_INTERVAL_SECONDS = 5.2
+MAX_PAGES = 25
+_last_request = 0.0
+
+
+async def _get(client: Any, params: dict[str, Any]) -> Any:
+    """One paced request; on a 429, wait as told (once) and retry."""
+    import asyncio
+    import time
+
+    global _last_request
+    for attempt in (1, 2):
+        wait = MIN_INTERVAL_SECONDS - (time.monotonic() - _last_request)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _last_request = time.monotonic()
         r = await client.get(
-            f"{BASE}/odds",
-            params={
-                "league": LEAGUES[league], "date": date, "market": "point_spread,total_points",
-                "is_main_line": "true", "is_live": "false", "limit": PAGE, "offset": offset,
-            },
-            headers={"X-API-Key": api_key(), "Accept": "application/json"},
-            timeout=30,
+            f"{BASE}/odds", params=params,
+            headers={"X-API-Key": api_key(), "Accept": "application/json"}, timeout=30,
         )
+        if r.status_code == 429 and attempt == 1:
+            try:
+                retry = float(r.headers.get("retry-after", "15"))
+            except ValueError:
+                retry = 15.0
+            await asyncio.sleep(min(max(retry, 5.0), 65.0))
+            continue
         if r.status_code == 429:
             raise SharpApiError("rate limited (429)")
         if r.status_code >= 400:
             # The body may explain (bad filter, plan scope); never echo headers.
             raise SharpApiError(f"HTTP {r.status_code}: {r.text[:200]}")
-        body = r.json()
-        page = body.get("data") or []
-        rows.extend(page)
+        return r.json()
+    raise SharpApiError("rate limited (429)")
+
+
+async def _odds_rows(client: Any, league: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Main-line spread and total rows for a league's upcoming games.
+
+    No date filter: in practice `date` did not narrow the results (a whole
+    week came back for each date asked), so one cursor-paged pass per league
+    is both complete and the cheapest in requests.
+    """
+    rows: list[dict[str, Any]] = []
+    meta: dict[str, Any] = {}
+    params: dict[str, Any] = {
+        "league": LEAGUES[league], "market": "point_spread,total_points",
+        "is_main_line": "true", "is_live": "false", "limit": PAGE,
+    }
+    for _ in range(MAX_PAGES):
+        body = await _get(client, params)
+        rows.extend(body.get("data") or [])
         meta = body.get("meta") or meta
-        pag = body.get("pagination") or {}
-        if not pag.get("has_more") and len(page) < PAGE:
+        cursor = (body.get("pagination") or {}).get("next_cursor")
+        if not cursor:
             break
-        offset += PAGE
+        params = {**params, "cursor": cursor}
     return rows, meta
 
 
@@ -107,9 +137,9 @@ def combine(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-async def lines(client: Any, league: str, date: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Combined lines for a league's games on `date` (YYYY-MM-DD)."""
+async def lines(client: Any, league: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Combined lines for a league's upcoming games."""
     if league not in LEAGUES:
         return [], {}
-    rows, meta = await _odds_rows(client, league, date)
+    rows, meta = await _odds_rows(client, league)
     return combine(rows), meta

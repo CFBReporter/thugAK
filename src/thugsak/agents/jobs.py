@@ -94,6 +94,9 @@ def games_needing_lines(conn, league: str, dates: list[str], *,
     return out
 
 
+SHARPAPI_DAYS = 8
+
+
 async def save_sharpapi_lines(league: str, dates: list[str], *, db: str) -> dict[str, Any]:
     """Store SharpAPI's consensus line for upcoming games (when a key is set).
 
@@ -114,19 +117,39 @@ async def save_sharpapi_lines(league: str, dates: list[str], *, db: str) -> dict
     books: set[str] = set()
     async with cache_mod.make_client() as client:
         with store.connect(db) as conn:
+            # SharpAPI returns the league's whole upcoming schedule, so match
+            # against the next SHARPAPI_DAYS of stored games, not one slate.
             index: dict[frozenset[str], Any] = {}
-            for d in dates:
+            first = datetime.strptime(dates[0], "%Y-%m-%d")
+            for k in range(SHARPAPI_DAYS):
+                d = (first + timedelta(days=k)).strftime("%Y-%m-%d")
                 for g in store.games_on_date(conn, league, d):
                     index[frozenset((g["home_team"], g["away_team"]))] = g
-            for d in dates:
-                found, _meta = await sharpapi.lines(client, league, d)
+            teams = store.all_teams(conn, league)
+
+            def resolve(name: str) -> str | None:
+                tid = matching.resolve_team(conn, league, name)
+                if tid:
+                    return tid
+                # "PHO Suns": an abbreviated city. Fall back to the nickname,
+                # accepted only when exactly one team in the league has it.
+                nick = name.split()[-1].lower() if name.split() else ""
+                hits = [t["team_id"] for t in teams
+                        if (t["display_name"] or "").lower().endswith(" " + nick)]
+                return hits[0] if len(hits) == 1 else None
+
+            for d in dates[:1]:
+                found, _meta = await sharpapi.lines(client, league)
                 got += len(found)
                 for ln in found:
-                    h = matching.resolve_team(conn, league, ln["home_team"])
-                    a = matching.resolve_team(conn, league, ln["away_team"])
+                    h = resolve(ln["home_team"])
+                    a = resolve(ln["away_team"])
                     g = index.get(frozenset((h, a))) if h and a else None
                     if g is None:
-                        unmatched.append(f"{ln['away_team']} @ {ln['home_team']}")
+                        # Beyond the window, or a game not stored yet: only a
+                        # name that failed to resolve is worth reporting.
+                        if not (h and a):
+                            unmatched.append(f"{ln['away_team']} @ {ln['home_team']}")
                         continue
                     matched += 1
                     start = _parse(g["start_time"])
