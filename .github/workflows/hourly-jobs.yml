@@ -51,6 +51,7 @@ jobs:
       - name: Run jobs
         env:
           THUGSAK_DATABASE_URL: ${{ secrets.THUGSAK_DATABASE_URL }}
+          SHARPAPI_KEY: ${{ secrets.SHARPAPI_KEY }}
           PYTHONUNBUFFERED: "1"
         run: |
           # Without the secret the code would quietly fall back to an empty

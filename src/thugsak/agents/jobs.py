@@ -94,6 +94,58 @@ def games_needing_lines(conn, league: str, dates: list[str], *,
     return out
 
 
+async def save_sharpapi_lines(league: str, dates: list[str], *, db: str) -> dict[str, Any]:
+    """Store SharpAPI's consensus line for upcoming games (when a key is set).
+
+    Overwrites the stored line every run until kickoff, so what remains is
+    the last pre-game consensus. Returns counts only -- the Actions logs are
+    public, and the data is not ours to republish.
+    """
+    from .. import cache as cache_mod, matching  # noqa: PLC0415
+    from ..clients import sharpapi  # noqa: PLC0415
+
+    if not sharpapi.available():
+        return {"skipped": "no SHARPAPI_KEY"}
+    if league not in sharpapi.LEAGUES:
+        return {"skipped": "league not covered"}
+    now = datetime.now(timezone.utc)
+    got = matched = written = 0
+    unmatched: list[str] = []
+    books: set[str] = set()
+    async with cache_mod.make_client() as client:
+        with store.connect(db) as conn:
+            index: dict[frozenset[str], Any] = {}
+            for d in dates:
+                for g in store.games_on_date(conn, league, d):
+                    index[frozenset((g["home_team"], g["away_team"]))] = g
+            for d in dates:
+                found, _meta = await sharpapi.lines(client, league, d)
+                got += len(found)
+                for ln in found:
+                    h = matching.resolve_team(conn, league, ln["home_team"])
+                    a = matching.resolve_team(conn, league, ln["away_team"])
+                    g = index.get(frozenset((h, a))) if h and a else None
+                    if g is None:
+                        unmatched.append(f"{ln['away_team']} @ {ln['home_team']}")
+                        continue
+                    matched += 1
+                    start = _parse(g["start_time"])
+                    if g["completed"] or (start is not None and start < now):
+                        continue
+                    # Their home team should be ours; if the pair matched the
+                    # other way round, flip the spread to our home side.
+                    spread = ln["spread"]
+                    if spread is not None and h != g["home_team"]:
+                        spread = -spread
+                    store.update_market_line(conn, g["game_id"], spread=spread, total=ln["total"],
+                                             overwrite=True)
+                    written += 1
+                    books.update(ln["books"])
+            conn.commit()
+    return {"source": "sharpapi", "lines": got, "matched": matched, "written": written,
+            "unmatched": len(unmatched), "unmatched_sample": unmatched[:3], "books": sorted(books)}
+
+
 async def save_lines(league: str, dates: list[str], *, db: str) -> dict[str, Any]:
     """Store ESPN's per-game sportsbook line (pickcenter) for upcoming games.
 
@@ -197,6 +249,11 @@ async def _league(league: str, date: str, *, daily: bool, db: str) -> dict[str, 
     # Lines before the record step, so recorded predictions see them.
     with step("lines"):
         tomorrow = (datetime.strptime(date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        try:
+            out["lines_sharpapi"] = await save_sharpapi_lines(league, [date, tomorrow], db=db)
+        except Exception as e:  # never let the odds feed stop the rest
+            out["lines_sharpapi"] = {"error": f"{type(e).__name__}: {str(e)[:160]}"}
+        # ESPN fills whatever SharpAPI did not (games it lacks, other leagues).
         out["lines"] = await save_lines(league, [date, tomorrow], db=db)
 
     with step("record"):
